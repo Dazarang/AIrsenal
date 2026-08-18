@@ -31,11 +31,15 @@ fi
   --gw "$GW" --deadline-epoch "$DEADLINE" > "$TMPD/ctx.json" \
   || fail "context generation failed"
 
+SEASON_NAME=$(python3 -c "import json;print(json.load(open('$TMPD/ctx.json'))['season_name'])")
 {
-  cat "$OPS_LIB_DIR/chip_prompt.md"
-  printf '\n\nToday is %s. The deadline is %s.\n' \
+  # explicit time/gameweek anchor FIRST - the model must never have to guess
+  printf '# You are deciding for: GAMEWEEK %s of the %s Premier League season\n' "$GW" "$SEASON_NAME"
+  printf 'Today is %s. The transfer deadline for this gameweek is %s.\n' \
     "$(date -u '+%A %d %B %Y, %H:%M UTC')" \
     "$(date -u -d "@$DEADLINE" '+%A %d %B %Y, %H:%M UTC')"
+  printf 'All research and every conclusion must target exactly this gameweek and season - include "%s" and "gameweek %s" in your web searches.\n\n' "$SEASON_NAME" "$GW"
+  cat "$OPS_LIB_DIR/chip_prompt.md"
   printf '\n## Context data (JSON)\n\n'
   cat "$TMPD/ctx.json"
 } > "$TMPD/prompt.txt"

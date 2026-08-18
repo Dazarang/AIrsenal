@@ -236,6 +236,7 @@ def cmd_context(args) -> None:
     ctx = {
         "gameweek": gw,
         "season": CURRENT_SEASON,
+        "season_name": f"20{CURRENT_SEASON[:2]}/{CURRENT_SEASON[2:]}",
         "deadline_utc": deadline.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "half": 1 if gw <= 19 else 2,
         "gameweeks_left_in_half": hi - gw + 1,

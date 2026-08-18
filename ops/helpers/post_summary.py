@@ -99,7 +99,6 @@ def cmd_telegram(args) -> None:
 
     from airsenal.framework.utils import (
         CURRENT_SEASON,
-        fetcher,
         get_bank,
         get_player_from_api_id,
         get_player_name,
@@ -120,19 +119,27 @@ def cmd_telegram(args) -> None:
 
     picks: list[dict] = []
     if not args.dry_run:
-        from airsenal.framework.data_fetcher import FPLDataFetcher
+        picks = fetch_picks_with_retry(args.team_id)
 
-        # the FPL PKCE login flow fails transiently; a fresh fetcher retries
-        # it from scratch (the module-level one latches login_failed)
-        for attempt in range(3):
-            f = fetcher if attempt == 0 else FPLDataFetcher(args.team_id)
-            try:
-                picks = sorted(
-                    f.get_current_picks(args.team_id), key=lambda p: p["position"]
-                )
-                break
-            except Exception as e:
-                print(f"picks fetch attempt {attempt + 1} failed: {e}", file=sys.stderr)
+    if not outs and picks and args.pre_picks:
+        # full-rebuild weeks (GW1, wildcard) have no OUT suggestion rows: the
+        # real moves are the diff between the pre-apply and post-apply squads
+        try:
+            with open(args.pre_picks) as f:
+                pre_elements = json.load(f)
+        except Exception:
+            pre_elements = []
+        post_elements = [p["element"] for p in picks]
+        outs = [
+            str(get_player_from_api_id(e))
+            for e in pre_elements
+            if e not in post_elements
+        ]
+        ins = [
+            str(get_player_from_api_id(e))
+            for e in post_elements
+            if e not in pre_elements
+        ]
 
     def squad_section(grouped: dict[str, list[str]], bench: list[str]) -> None:
         for pos in ("GK", "DEF", "MID", "FWD"):
@@ -190,6 +197,25 @@ def cmd_telegram(args) -> None:
     if args.pred:
         lines.append(f"\U0001f4c8 pred: {esc(args.pred)}")
     print("\n".join(lines))
+
+
+def fetch_picks_with_retry(team_id: int) -> list[dict]:
+    from airsenal.framework.data_fetcher import FPLDataFetcher
+    from airsenal.framework.utils import fetcher
+
+    # the FPL PKCE login flow fails transiently; a fresh fetcher retries it
+    # from scratch (the module-level one latches login_failed)
+    for attempt in range(3):
+        f = fetcher if attempt == 0 else FPLDataFetcher(team_id)
+        try:
+            return sorted(f.get_current_picks(team_id), key=lambda p: p["position"])
+        except Exception as e:
+            print(f"picks fetch attempt {attempt + 1} failed: {e}", file=sys.stderr)
+    return []
+
+
+def cmd_picks_elements(args) -> None:
+    print(json.dumps([p["element"] for p in fetch_picks_with_retry(args.team_id)]))
 
 
 def applied_transfer_count(team_id: int, gw: int) -> int:
@@ -263,8 +289,13 @@ def main() -> None:
     p.add_argument("--mode", default="")
     p.add_argument("--pred", default="")
     p.add_argument("--bank-before", default="")
+    p.add_argument("--pre-picks", default="", help="JSON file of pre-apply element ids")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_telegram)
+
+    p = sub.add_parser("picks-elements")
+    p.add_argument("--team-id", type=int, required=True)
+    p.set_defaults(func=cmd_picks_elements)
 
     p = sub.add_parser("transfer-count")
     p.add_argument("--gw", type=int, required=True)

@@ -73,6 +73,46 @@ def cmd_assert_gw(args) -> None:
         sys.exit(3)
 
 
+def compute_available_chips(
+    gw: int, season: str, played: list[dict], entries: list[dict]
+) -> tuple[list[str], list[str]]:
+    """
+    Pure chip-availability logic (2026/27 rules: ALL four chips reset at the
+    half boundary - one full set per half, first set dies at the GW19
+    deadline). Returns (available, notes).
+    """
+    lo, hi = half_range(gw)
+    notes: list[str] = []
+    used_this_half = {p["chip"] for p in played if lo <= p["gw"] <= hi}
+    pending = {
+        e["chip"]
+        for e in entries
+        if e.get("season") == season
+        and lo <= e["gw"] <= hi
+        and not e.get("lapsed")
+        and (e["gw"] != gw or e.get("confirmed"))
+    }
+    available = [c for c in CHIPS if c not in used_this_half and c not in pending]
+    if gw == 1:
+        # free_hit is banned in GW1 by the rules; wildcard is pointless
+        # (pre-season transfers are unlimited) and the GW1 code path ignores it
+        available = [c for c in available if c not in ("wildcard", "free_hit")]
+    if (
+        gw == 20
+        and "free_hit" in available
+        and any(p["chip"] == "free_hit" and p["gw"] == 19 for p in played)
+    ):
+        available.remove("free_hit")
+        notes.append("free_hit is blocked in GW20 because it was played in GW19.")
+    if any(p["gw"] == gw for p in played):
+        available = []
+        notes.append(
+            "a chip is already active for this gameweek - no further chip "
+            "may be played."
+        )
+    return available, notes
+
+
 def chips_played_from_api(fetcher, team_id: int) -> list[dict]:
     hist = fetcher.get_fpl_team_history_data(team_id)
     return [
@@ -135,8 +175,7 @@ def cmd_context(args) -> None:
     notes: list[str] = []
 
     played = chips_played_from_api(fetcher, team_id)
-    lo, hi = half_range(gw)
-    used_this_half = {p["chip"] for p in played if lo <= p["gw"] <= hi}
+    _, hi = half_range(gw)
 
     # reconcile past decisions with reality (current season only)
     state = load_state()
@@ -153,35 +192,11 @@ def cmd_context(args) -> None:
             )
     save_state(state)
 
-    pending = {
-        e["chip"]
-        for e in state["entries"]
-        if e.get("season") == CURRENT_SEASON
-        and lo <= e["gw"] <= hi
-        and not e.get("lapsed")
-        and (e["gw"] != gw or e.get("confirmed"))
-    }
-    available = [c for c in CHIPS if c not in used_this_half and c not in pending]
-    if gw == 1:
-        # pre-GW1 transfers are already unlimited (wildcard is pointless, and
-        # the GW1 optimization path ignores WC/FH flags anyway); free_hit is
-        # banned by the rules
-        available = [c for c in available if c not in ("wildcard", "free_hit")]
-    if (
-        gw == 20
-        and "free_hit" in available
-        and any(p["chip"] == "free_hit" and p["gw"] == 19 for p in played)
-    ):
-        available.remove("free_hit")
-        notes.append("free_hit is blocked in GW20 because it was played in GW19.")
-    if any(p["gw"] == gw for p in played):
-        # only one chip per gameweek - something is already active
-        available = []
-        notes.append(
-            "a chip is already active for this gameweek - no further chip "
-            "may be played."
-        )
-    elif available:
+    available, avail_notes = compute_available_chips(
+        gw, CURRENT_SEASON, played, state["entries"]
+    )
+    notes.extend(avail_notes)
+    if available:
         # server-side cross-check via my-team chip statuses (requires login)
         try:
             api_available = {

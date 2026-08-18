@@ -11,11 +11,15 @@ for the coming gameweeks (blank/double gameweek detection).
 - Chips: wildcard (unlimited permanent transfers), free_hit (unlimited
   transfers for one GW, squad reverts after), triple_captain (captain points
   x3), bench_boost (bench points count).
-- One set of all four chips per half-season. First-half chips EXPIRE if unused
-  when the GW19 deadline passes. Only one chip can be played per gameweek.
+- ALL FOUR chips come as one full set per half-season: using a chip in the
+  first half does NOT consume the second-half copy — the full set refreshes
+  at GW20. First-half chips EXPIRE if unused when the GW19 deadline passes.
+  Only one chip can be played per gameweek.
 - free_hit cannot be played in GW1. If free_hit was used in GW19, the second
   free_hit cannot be played in GW20.
-- Only chips listed in `chips_available` may be chosen.
+- `chips_available` in the context is authoritative — it already accounts for
+  everything used, decided, and the half boundary. Only chips listed there
+  may be chosen; never reason about availability from memory.
 
 ## Your research — MANDATORY, live web search only
 
@@ -55,8 +59,16 @@ output play_chip: false — never fall back to memory.
 - free_hit: blank gameweeks where the squad cannot field a strong XI.
 - bench_boost / triple_captain: double gameweeks, or triple_captain for a
   premium captain with an exceptional single fixture.
+- LOOK AHEAD before playing: scan `fixtures_by_gameweek` (and your research)
+  for upcoming double/blank gameweeks within THIS half. If a clearly better
+  chip opportunity is coming and `gameweeks_left_in_half` leaves room, HOLD.
+  A chip played into a mediocre week that could have hit a double is a real
+  loss.
 - As GW19 (or GW38) approaches with chips still unused, lower the bar —
   an expiring chip that is never played is worth zero.
+- There is no reward for activity: you are judged only on net points over the
+  half-season. "play_chip": false is the default and the correct output most
+  gameweeks; never play a chip because one is available.
 
 ## Output format
 

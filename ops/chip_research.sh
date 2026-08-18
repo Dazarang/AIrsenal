@@ -50,12 +50,12 @@ mkdir -p "$CHIP_LOG_DIR"
 RESEARCH_TS=$(date +%Y%m%dT%H%M%S)
 cp "$TMPD/prompt.txt" "$CHIP_LOG_DIR/gw${GW}-${RESEARCH_TS}.prompt.txt"
 
-echo "chip research: running claude (opus @ xhigh)..." >&2
+echo "chip research: running claude (opus @ max)..." >&2
 CLAUDE_OK=0
 for attempt in 1 2; do
   # prompt via stdin, not argv (context JSON can grow; argv has ARG_MAX limits)
-  if timeout -k 30 720 "$CLAUDE_BIN" -p \
-      --model opus --effort xhigh \
+  if timeout -k 30 900 "$CLAUDE_BIN" -p \
+      --model opus --effort max \
       --output-format json \
       --dangerously-skip-permissions \
       --max-turns 30 \

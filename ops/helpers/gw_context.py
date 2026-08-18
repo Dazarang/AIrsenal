@@ -272,6 +272,12 @@ def cmd_context(args) -> None:
         bank = get_bank(fpl_team_id=team_id) / 10
     except Exception:
         bank = None
+    try:
+        squad_value = (
+            sum(p["selling_price"] for p in fetcher.get_current_picks(team_id)) / 10
+        )
+    except Exception:
+        squad_value = None
 
     # per-team fixture counts for the next 6 gameweeks (blank/double detection)
     fixtures = session.scalars(
@@ -319,6 +325,7 @@ def cmd_context(args) -> None:
         "performance": performance,
         "free_transfers": free_transfers,
         "bank": bank,
+        "squad_value": squad_value,
         "fixtures_by_gameweek": fixture_info,
         "notes": notes,
     }

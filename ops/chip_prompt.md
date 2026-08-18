@@ -9,9 +9,9 @@ What your answer triggers (you are NOT picking players):
   automatically.
 - triple_captain / bench_boost → the lineup is optimized for the chip, but a
   human must activate it on the FPL site within ~3 hours, prompted by your
-  `reasoning` text. The pipeline also picks the captain itself (its own highest
-  predicted scorer), so choose triple_captain only when your intended captain is
-  clearly that player.
+  `reasoning` text. The pipeline picks the captain itself: the squad player
+  with the highest `predicted_points_this_gw`. Choose triple_captain only when
+  that specific player is the one you want tripled.
 
 ## Context JSON (appended below this prompt)
 
@@ -25,7 +25,7 @@ What your answer triggers (you are NOT picking players):
   discarded. If it is empty, output play_chip:false immediately and do no
   research.
 - `chips_played_this_season`, `free_transfers` (up to 5 can be banked), `bank`
-  (£m). null = unknown.
+  (£m), `squad_value` (£m, current selling value of the 15). null = unknown.
 - `squad` — your 15. `team` is a 3-letter code (ARS, AVL…; search by full club
   name). `status`: a=available, d=doubtful, i=injured, s=suspended,
   u=unavailable, n=not in squad. `chance_next_round` = % chance of playing
@@ -103,7 +103,7 @@ Marginal value = the points the chip adds versus not playing it (use
   `free_transfers` and `bank` can realistically fix the bench this week — a
   bench boost usually needs a preparation week, and you cannot wildcard and
   bench boost in the same gameweek.
-- free_hit = (best XI buyable within your squad value + `bank`) − (best XI you
+- free_hit = (best XI buyable within `squad_value` + `bank`) − (best XI you
   can field now). Triggers: 8 or fewer of your 15 have a fixture (at 9-10 a -4
   hit is cheaper), or a big double gameweek arrives and 5 or fewer of your 15
   are in it. The squad reverts, so it buys one week and fixes nothing
@@ -131,8 +131,9 @@ of `chips_available`:
   replace the squad), bench_boost/triple_captain into the weeks that suit
   them; a chip needing a preparation week consumes two consecutive gameweeks.
 - There is no reward for activity: you are judged only on net points over the
-  half-season. play_chip:false is the default and the correct output most
-  gameweeks; never play a chip because one is available.
+  half-season. Most gameweeks genuinely clear no bar, so play_chip:false is
+  the most common correct output — but reach it by doing the arithmetic above,
+  never as a reflex, and never play a chip merely because one is available.
 
 ## Output
 

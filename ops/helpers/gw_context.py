@@ -81,6 +81,38 @@ def chips_played_from_api(fetcher, team_id: int) -> list[dict]:
     ]
 
 
+def team_performance(fetcher, team_id: int) -> dict:
+    """Recent gameweek returns vs the global average - the wildcard signal."""
+    hist = fetcher.get_fpl_team_history_data(team_id)
+    averages = {
+        e["id"]: e.get("average_entry_score")
+        for e in fetcher.get_current_summary_data().get("events", [])
+    }
+    recent = hist.get("current", [])[-5:]
+    if not recent:
+        return {"note": "season not started - no performance history yet"}
+    perf = {
+        "recent_gameweeks": [
+            {
+                "gw": h["event"],
+                "points": h["points"],
+                "global_average": averages.get(h["event"]),
+                "overall_rank": h["overall_rank"],
+                "points_on_bench": h.get("points_on_bench"),
+            }
+            for h in recent
+        ],
+        "total_points": recent[-1]["total_points"],
+        "overall_rank": recent[-1]["overall_rank"],
+    }
+    if len(recent) >= 3:
+        # positive = rank improved over the last 3 gameweeks
+        perf["rank_change_last_3_gws"] = (
+            recent[-3]["overall_rank"] - recent[-1]["overall_rank"]
+        )
+    return perf
+
+
 def cmd_context(args) -> None:
     from sqlalchemy import select
 
@@ -186,10 +218,18 @@ def cmd_context(args) -> None:
                     "status": data.get("status"),
                     "news": data.get("news") or None,
                     "chance_next_round": data.get("chance_of_playing_next_round"),
+                    "form": data.get("form"),
+                    "total_points": data.get("total_points"),
                 }
             )
     except Exception as e:  # context is best-effort: research degrades gracefully
         notes.append(f"could not fetch current squad ({type(e).__name__}: {e})")
+
+    try:
+        performance = team_performance(fetcher, team_id)
+    except Exception as e:
+        performance = {}
+        notes.append(f"could not fetch performance history ({type(e).__name__})")
 
     try:
         free_transfers = get_free_transfers(fpl_team_id=team_id, gameweek=gw)
@@ -243,6 +283,7 @@ def cmd_context(args) -> None:
         "chips_available": available,
         "chips_played_this_season": played,
         "squad": squad_info,
+        "performance": performance,
         "free_transfers": free_transfers,
         "bank": bank,
         "fixtures_by_gameweek": fixture_info,

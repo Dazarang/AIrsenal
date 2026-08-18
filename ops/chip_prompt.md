@@ -43,8 +43,15 @@ output play_chip: false — never fall back to memory.
 
 - Be conservative: the expected value of playing the chip must CLEARLY beat
   holding it. Most gameweeks the right answer is no chip.
-- wildcard: squad crisis (3+ unavailable/flagged starters) or a decisive
-  fixture swing; play with a multi-week outlook.
+- The context includes `performance` (recent gameweek points vs the global
+  average, overall-rank trend, bench points) and per-player `form`. Judge
+  wildcard on STRUCTURAL underperformance: several squad players injured,
+  flagged, or persistently out of form, or team scores below the global
+  average for 3+ consecutive gameweeks. One bad week with a healthy squad is
+  a hold, never a wildcard.
+- wildcard: squad crisis (3+ unavailable/flagged starters), structural
+  underperformance as defined above, or a decisive fixture swing; play with
+  a multi-week outlook.
 - free_hit: blank gameweeks where the squad cannot field a strong XI.
 - bench_boost / triple_captain: double gameweeks, or triple_captain for a
   premium captain with an exceptional single fixture.

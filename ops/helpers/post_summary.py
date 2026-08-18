@@ -119,12 +119,19 @@ def cmd_telegram(args) -> None:
 
     picks: list[dict] = []
     if not args.dry_run:
-        try:
-            picks = sorted(
-                fetcher.get_current_picks(args.team_id), key=lambda p: p["position"]
-            )
-        except Exception as e:
-            print(f"could not fetch picks: {e}", file=sys.stderr)
+        from airsenal.framework.data_fetcher import FPLDataFetcher
+
+        # the FPL PKCE login flow fails transiently; a fresh fetcher retries
+        # it from scratch (the module-level one latches login_failed)
+        for attempt in range(3):
+            f = fetcher if attempt == 0 else FPLDataFetcher(args.team_id)
+            try:
+                picks = sorted(
+                    f.get_current_picks(args.team_id), key=lambda p: p["position"]
+                )
+                break
+            except Exception as e:
+                print(f"picks fetch attempt {attempt + 1} failed: {e}", file=sys.stderr)
 
     if picks:
 

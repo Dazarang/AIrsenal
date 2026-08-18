@@ -81,12 +81,21 @@ sys.exit(0 if session.scalars(select(Player)).first() else 1)
 " || { log "FATAL: database is empty - run airsenal_setup_initial_db"; exit 1; }
 
 log "checking FPL login..."
-"$PY" -c "
+LOGIN_OK=0
+for login_try in 1 2 3; do
+  if "$PY" -c "
 from airsenal.framework.data_fetcher import FPLDataFetcher
 f = FPLDataFetcher()
 f.login()
 raise SystemExit(0 if f.logged_in else 1)
-" || { log "FATAL: FPL login failed - credentials wrong or FPL changed their login flow"; exit 1; }
+"; then
+    LOGIN_OK=1
+    break
+  fi
+  log "login attempt $login_try failed (FPL login flow is transiently flaky), retrying..."
+  sleep 20
+done
+(( LOGIN_OK )) || { log "FATAL: FPL login failed 3x - credentials wrong or FPL changed their login flow"; exit 1; }
 
 # --- step 2: database backup --------------------------------------------------
 CURRENT_STEP="database backup"

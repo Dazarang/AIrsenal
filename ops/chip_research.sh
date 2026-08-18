@@ -23,7 +23,9 @@ fail() {
 }
 
 [[ -x "$CLAUDE_BIN" ]] || fail "claude binary not found at $CLAUDE_BIN"
-[[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] || fail "CLAUDE_CODE_OAUTH_TOKEN not set"
+if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" && ! -f "$HOME/.claude/.credentials.json" ]]; then
+  fail "no claude credentials (CLAUDE_CODE_OAUTH_TOKEN unset and no stored login)"
+fi
 
 "$PY" "$OPS_LIB_DIR/helpers/gw_context.py" context \
   --gw "$GW" --deadline-epoch "$DEADLINE" > "$TMPD/ctx.json" \

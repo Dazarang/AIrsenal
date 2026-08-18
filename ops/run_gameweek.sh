@@ -126,7 +126,15 @@ fi
 CURRENT_STEP="gameweek assertion"
 "$PY" "$OPS_LIB_DIR/helpers/gw_context.py" assert-gw --gw "$GW"
 
-# --- step 5: chip research ----------------------------------------------------
+# --- step 5: predictions (before chip research so the chip decision can use
+# --- AIrsenal's own predicted points) -----------------------------------------
+CURRENT_STEP="airsenal_run_prediction"
+if (( $(mins_left) < 60 )); then
+  notify_soft "${PREFIX}AIrsenal GW${GW}: only $(mins_left)m to deadline before predictions - run may not finish. Consider making transfers manually."
+fi
+"$VENV_BIN/airsenal_run_prediction" --weeks_ahead "${WEEKS_AHEAD:-3}"
+
+# --- step 6: chip research ----------------------------------------------------
 CURRENT_STEP="chip research"
 if [[ -f "$S.applied" || -f "$S.posted" ]]; then
   # transfers already POSTed on a previous attempt: reuse that decision,
@@ -138,13 +146,6 @@ else
   CHIP=${CHIP##*$'\n'}  # last line only
 fi
 log "chip decision: $CHIP"
-
-# --- step 6: predictions ------------------------------------------------------
-CURRENT_STEP="airsenal_run_prediction"
-if (( $(mins_left) < 60 )); then
-  notify_soft "${PREFIX}AIrsenal GW${GW}: only $(mins_left)m to deadline before predictions - run may not finish. Consider making transfers manually."
-fi
-"$VENV_BIN/airsenal_run_prediction" --weeks_ahead "${WEEKS_AHEAD:-3}"
 
 # --- step 7: optimization -----------------------------------------------------
 CURRENT_STEP="airsenal_run_optimization"

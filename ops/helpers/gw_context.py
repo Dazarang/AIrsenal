@@ -222,9 +222,26 @@ def cmd_context(args) -> None:
             next_gw=gw, season=CURRENT_SEASON, fpl_team_id=team_id, use_api=True
         )
         summary = fetcher.get_player_summary_data()
+        try:
+            from airsenal.framework.utils import (
+                get_latest_prediction_tag,
+                get_predicted_points_for_player,
+            )
+
+            tag = get_latest_prediction_tag()
+        except Exception:
+            tag = None
         for p in squad.players:
             player = get_player(p.player_id)
             data = summary.get(player.fpl_api_id, {}) if player else {}
+            predicted = None
+            if tag and player:
+                try:
+                    predicted = round(
+                        get_predicted_points_for_player(player, tag).get(gw, 0), 1
+                    )
+                except Exception:
+                    predicted = None
             squad_info.append(
                 {
                     "name": player.name if player else str(p.player_id),
@@ -235,6 +252,7 @@ def cmd_context(args) -> None:
                     "chance_next_round": data.get("chance_of_playing_next_round"),
                     "form": data.get("form"),
                     "total_points": data.get("total_points"),
+                    "predicted_points_this_gw": predicted,
                 }
             )
     except Exception as e:  # context is best-effort: research degrades gracefully

@@ -102,10 +102,10 @@ cp "$TMPD/decision.json" "$CHIP_LOG_DIR/gw${GW}-${RESEARCH_TS}.decision.json"
 CHIP=$("$PY" "$OPS_LIB_DIR/helpers/gw_context.py" validate \
   --context "$TMPD/ctx.json" < "$TMPD/decision.json") || fail "decision validation failed"
 
-# a decision to PLAY a chip that did zero live research is not trustworthy
-if [[ "$CHIP" != "none" ]] && (( SEARCHES == 0 )); then
-  notify_soft "AIrsenal GW${GW}: chip research suggested ${CHIP} but performed ZERO web searches (training data only) - rejecting the decision, no chip will be played." >&2
-  echo "chip research: rejected $CHIP (0 searches)" >&2
+# a decision to PLAY a chip that did almost no live research is not trustworthy
+if [[ "$CHIP" != "none" ]] && (( SEARCHES < 2 )); then
+  notify_soft "AIrsenal GW${GW}: chip research suggested ${CHIP} but performed only ${SEARCHES} web lookups (training data risk) - rejecting the decision, no chip will be played." >&2
+  echo "chip research: rejected $CHIP (${SEARCHES} lookups)" >&2
   CHIP="none"
 fi
 

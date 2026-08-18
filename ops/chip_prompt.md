@@ -1,80 +1,156 @@
-# FPL chip decision — research task
+# FPL chip decision — live research task
 
-You are deciding whether a Fantasy Premier League manager should play a chip
-THIS gameweek. The context data below (JSON) gives: the gameweek and deadline,
-which chips are still available this half of the season, the current squad with
-injury/availability flags, free transfers, bank, and per-team fixture counts
-for the coming gameweeks (blank/double gameweek detection).
+Decide whether this Fantasy Premier League manager plays ONE chip THIS gameweek.
+A wrong chip costs real points; a chip left unplayed when its half ends is worth
+exactly zero. Both are real errors — do not simply default to "no".
 
-## Chip rules
+What your answer triggers (you are NOT picking players):
+- wildcard / free_hit → AIrsenal's optimizer rebuilds the squad and POSTs it
+  automatically.
+- triple_captain / bench_boost → the lineup is optimized for the chip, but a
+  human must activate it on the FPL site within ~3 hours, prompted by your
+  `reasoning` text. The pipeline also picks the captain itself (its own highest
+  predicted scorer), so choose triple_captain only when your intended captain is
+  clearly that player.
 
-- Chips: wildcard (unlimited permanent transfers), free_hit (unlimited
-  transfers for one GW, squad reverts after), triple_captain (captain points
-  x3), bench_boost (bench points count).
-- ALL FOUR chips come as one full set per half-season: using a chip in the
-  first half does NOT consume the second-half copy — the full set refreshes
-  at GW20. First-half chips EXPIRE if unused when the GW19 deadline passes.
-  Only one chip can be played per gameweek.
-- free_hit cannot be played in GW1. If free_hit was used in GW19, the second
-  free_hit cannot be played in GW20.
-- `chips_available` in the context is authoritative — it already accounts for
-  everything used, decided, and the half boundary. Only chips listed there
-  may be chosen; never reason about availability from memory.
+## Context JSON (appended below this prompt)
 
-## Your research — MANDATORY, live web search only
+- `gameweek`, `season` ("2627" = 2026/27), `season_name`, `deadline_utc`,
+  `gameweeks_left_in_half` (includes this gameweek). Two chip sets per season:
+  set 1 dies at the GW19 deadline, set 2 runs GW20-38, no rollover, one chip per
+  gameweek.
+- `chips_available` — AUTHORITATIVE. It already applies chips used,
+  one-per-gameweek, the GW1 and GW19/GW20 restrictions and the FPL server's own
+  chip status. Choose only from it, spelled exactly; anything else is silently
+  discarded. If it is empty, output play_chip:false immediately and do no
+  research.
+- `chips_played_this_season`, `free_transfers` (up to 5 can be banked), `bank`
+  (£m). null = unknown.
+- `squad` — your 15. `team` is a 3-letter code (ARS, AVL…; search by full club
+  name). `status`: a=available, d=doubtful, i=injured, s=suspended,
+  u=unavailable, n=not in squad. `chance_next_round` = % chance of playing
+  (null = unflagged). `form` = FPL's recent average. `predicted_points_this_gw`
+  = AIrsenal's own model prediction — use it as the base number in every EV
+  calculation below. FPL's flags lag press conferences — verify them.
+- `performance` — recent gameweek points vs the global average, overall-rank
+  trend, bench points. The wildcard signal: judge STRUCTURAL underperformance
+  (below the global average 3+ consecutive gameweeks, several players out of
+  form or flagged), never one bad week with a healthy squad.
+- `fixtures_by_gameweek` — `doubles`/`blanks` per gameweek (same team codes)
+  for this gameweek and the next five, from AIrsenal's database. THIS gameweek
+  is reliable; later gameweeks are not — rounds whose fixtures are not
+  scheduled yet show up as mass blanks, and doubles appear only once postponed
+  matches are re-dated. Treat an unconfirmed future double as ~50-70% likely,
+  and never act on a future blank you have not verified live.
+- `notes` — read these FIRST. If a note reports a failure, or `squad` is empty,
+  you cannot assess a chip: output play_chip:false and say so.
 
-Your training data predates this Premier League season. Squads, transfers,
-injuries, managers, form and fixtures have all changed since then. Do NOT
-state or rely on any fact about the current season from memory — every
-season-specific claim in your reasoning must come from a web search result
-you made in this session, and recent enough to matter (this week for injury
-news).
+## Research — live sources only
 
-Search the web for, at minimum:
-1. Injury/rotation/suspension news for the squad players in the context and
-   for premium captaincy options (latest press conferences, reliable FPL news
-   sites). Cross-check the injury flags in the context data against current
-   news.
-2. Current FPL community chip strategy for THIS specific gameweek (search
-   e.g. "FPL gameweek <N> chip strategy" with the current season) — is this
-   widely seen as a chip week, and why?
-3. This gameweek's fixtures and difficulty for the top teams.
+Whatever you remember about this season is incomplete or out of date:
+transfers, loans, managers, penalty and set-piece duties, form, injuries, even
+scoring rules. Feeling sure about a current-season fact is not evidence. Every
+season-specific claim you make must come from a page you opened in THIS
+session — dated within ~7 days for team news, this season for anything else.
+If you write a fact you did not read today, delete it.
 
-If your searches fail or return nothing useful, say so in the reasoning and
-output play_chip: false — never fall back to memory.
+At least two of your lookups must be WebSearch calls (a decision to play a
+chip made with fewer than two is automatically thrown away). Priorities, in
+order:
+1. This gameweek's actual fixtures — confirm the context's doubles/blanks.
+   `https://fantasy.premierleague.com/api/fixtures/?event=<gameweek>` is
+   authoritative; its team ids are numeric, but the number of fixtures alone
+   tells you whether the round is normal (10), doubled (>10) or blanked (<10).
+   Then search for which clubs.
+2. Team news from the last 48h for every flagged squad player and for the
+   captaincy candidates: press conferences, injury round-ups, suspensions
+   (yellow-card totals), plus midweek European fixtures either side of this
+   gameweek — the main rotation signal.
+3. A numeric read on the captain: bookmaker anytime-scorer and clean-sheet
+   odds are the best public proxy for expected points.
+4. Chip-strategy consensus for this gameweek this season and its reasons —
+   evidence about fixtures, not authority: the decision is about THIS squad.
 
-## Decision policy
+Check every page's date and that it names the current season and gameweek;
+discard the rest, and corroborate anything decisive with a second source.
+Ignore ownership %, transfer leaderboards, price-change predictors and pundit
+tips: they cost turns and decide nothing.
 
-- Be conservative: the expected value of playing the chip must CLEARLY beat
-  holding it. Most gameweeks the right answer is no chip.
-- The context includes `performance` (recent gameweek points vs the global
-  average, overall-rank trend, bench points) and per-player `form`. Judge
-  wildcard on STRUCTURAL underperformance: several squad players injured,
-  flagged, or persistently out of form, or team scores below the global
-  average for 3+ consecutive gameweeks. One bad week with a healthy squad is
-  a hold, never a wildcard.
-- wildcard: squad crisis (3+ unavailable/flagged starters), structural
-  underperformance as defined above, or a decisive fixture swing; play with
-  a multi-week outlook.
-- free_hit: blank gameweeks where the squad cannot field a strong XI.
-- bench_boost / triple_captain: double gameweeks, or triple_captain for a
-  premium captain with an exceptional single fixture.
-- LOOK AHEAD before playing: scan `fixtures_by_gameweek` (and your research)
-  for upcoming double/blank gameweeks within THIS half. If a clearly better
-  chip opportunity is coming and `gameweeks_left_in_half` leaves room, HOLD.
-  A chip played into a mediocre week that could have hit a double is a real
-  loss.
-- As GW19 (or GW38) approaches with chips still unused, lower the bar —
-  an expiring chip that is never played is worth zero.
+Budget: 6-10 searches/fetches, under 8 minutes. The run is killed at 30 turns
+or 15 minutes and the decision is then lost entirely — once you can decide, or
+after ~10 tool calls, stop researching and output the JSON. If your searches
+fail or return nothing usable, say so and output play_chip:false. Never fall
+back to memory.
+
+## Deciding
+
+Count first, from `squad` plus this gameweek's `doubles`/`blanks` (as
+corrected by your research): how many of the 15 have no fixture, how many have
+two, and how many are genuinely out (`i`/`s`/`u`, or `chance_next_round` <= 25
+— a 75% doubt usually plays).
+
+Marginal value = the points the chip adds versus not playing it (use
+`predicted_points_this_gw` as the base numbers):
+- triple_captain = one extra copy of your captain's expected score. Premium
+  with a good single fixture 6-9; a confirmed-fit premium with two fixtures
+  11-14. The floor is partly hedged (a captain who plays 0 minutes passes the
+  triple to the vice-captain), so in a double the real risk is rotation or a
+  suspension, not fixture quality.
+- bench_boost = the sum of your 4 bench players' expected points, minus ~1.5
+  for the loss of auto-subs. NOT "a double gameweek": it needs four nailed
+  starters who all play, and a backup keeper who never plays makes it a
+  3-player chip. A fodder bench returns 3-8 even in a double. Ask whether
+  `free_transfers` and `bank` can realistically fix the bench this week — a
+  bench boost usually needs a preparation week, and you cannot wildcard and
+  bench boost in the same gameweek.
+- free_hit = (best XI buyable within your squad value + `bank`) − (best XI you
+  can field now). Triggers: 8 or fewer of your 15 have a fixture (at 9-10 a -4
+  hit is cheaper), or a big double gameweek arrives and 5 or fewer of your 15
+  are in it. The squad reverts, so it buys one week and fixes nothing
+  structural — never a substitute for a needed wildcard.
+- wildcard = 4 × max(0, transfers you want − `free_transfers`) + roughly 2-4
+  points per gameweek of squad uplift over the rest of the half, justified by
+  `performance` showing structural underperformance. Flagged players are a
+  transfer problem, not a wildcard trigger, and a bank of 5 free transfers is
+  already a mini-wildcard. The wildcard also decays fastest — played in the
+  last 1-2 gameweeks of a half it is worth almost nothing, so if it is going
+  to be used, use it before the others.
+
+Bar (yardsticks, not measurements). slack = `gameweeks_left_in_half` − number
+of `chips_available`:
+- slack >= 6: full bar — triple_captain >= 10, bench_boost >= 18, free_hit
+  >= 20, wildcard >= 20 (multi-week total).
+- slack 3-5: 0.75 × those. slack 1-2: 0.5 × those.
+- slack <= 0: a chip will be lost — play the best one available this gameweek.
+- First half only: GW1-19 has few double gameweeks and few blanks, so from
+  GW10 onwards use at most the 0.75 bar and ask "is this the best week left
+  before GW19?" rather than "does it clear an absolute bar". Hoarding all four
+  chips is the common failure.
+- Otherwise hold only if you can name a specific, likely better week ahead.
+- Sequencing when several chips remain: wildcard/free_hit first (they build or
+  replace the squad), bench_boost/triple_captain into the weeks that suit
+  them; a chip needing a preparation week consumes two consecutive gameweeks.
 - There is no reward for activity: you are judged only on net points over the
-  half-season. "play_chip": false is the default and the correct output most
+  half-season. play_chip:false is the default and the correct output most
   gameweeks; never play a chip because one is available.
 
-## Output format
+## Output
 
-End your reply with a single raw JSON object (no code fence) exactly like:
+Finish with a few sentences of reasoning, then exactly ONE raw JSON object:
+the last thing in your message, on a single line, no code fence, and no other
+JSON object anywhere in that message.
 
-{"play_chip": false, "chip": null, "confidence": 0.9, "reasoning": "2-3 sentences explaining the decision"}
+{"play_chip": false, "chip": null, "confidence": 0.8, "sources": ["site - date - fact"], "reasoning": "1-3 sentences"}
 
-`chip` must be one of "wildcard", "free_hit", "triple_captain", "bench_boost"
-or null. `confidence` is 0-1 for the decision you output.
+- `chip`: a string copied from `chips_available`, or null when `play_chip` is
+  false. A chip that is not in that list, or play_chip:true with a null chip,
+  is silently discarded.
+- `confidence`: your probability that the action you chose beats the
+  alternative. play_chip:true is only accepted at >= 0.6 — if you cannot
+  honestly get there, output play_chip:false and say why. Do not inflate the
+  number to clear the bar.
+- `sources`: 2-6 pages you actually opened this session, each with its date.
+- `reasoning`: sent verbatim to the manager's phone — plain text, no newlines,
+  no markup. For triple_captain/bench_boost it must say what to activate and
+  why (name the captain), because they have to click it themselves before the
+  deadline.

@@ -124,6 +124,9 @@ flake8-unused-arguments.ignore-variadic-names = true  # allow unused *args/**kwa
 	"B011",  # allow using assert statements in tests
 	"ARG001"  # allow unused arguments in tests, e.g. for pytest fixtures
 ]
+"ops/**" = [
+	"PLC0415",  # ops helpers defer heavy airsenal imports into subcommands
+]
 
 [tool.mypy]
 files = ["airsenal/framework", "airsenal/scripts"]

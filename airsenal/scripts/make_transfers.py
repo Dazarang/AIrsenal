@@ -309,7 +309,9 @@ def build_transfer_payload(
         "wildcard": False,
         "freehit": False,
     }
-    if chip_played:
+    # only wildcard/free_hit are valid fields on the transfers endpoint;
+    # triple_captain/bench_boost cannot be played via the API at all
+    if chip_played in ("wildcard", "free_hit"):
         transfer_payload[chip_played.replace("_", "")] = True
 
     print(transfer_payload)

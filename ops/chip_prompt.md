@@ -147,7 +147,8 @@ JSON object anywhere in that message.
   false. A chip that is not in that list, or play_chip:true with a null chip,
   is silently discarded.
 - `confidence`: your probability that the action you chose beats the
-  alternative. play_chip:true is only accepted at >= 0.6 — if you cannot
+  alternative. play_chip:true is only accepted at >= 0.6 (relaxed to >= 0.5
+  automatically once chips are close to expiring, slack <= 2) — if you cannot
   honestly get there, output play_chip:false and say why. Do not inflate the
   number to clear the bar.
 - `sources`: 2-6 pages you actually opened this session, each with its date.

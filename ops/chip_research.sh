@@ -32,6 +32,13 @@ fi
   || fail "context generation failed"
 
 SEASON_NAME=$(python3 -c "import json;print(json.load(open('$TMPD/ctx.json'))['season_name'])")
+read -r CHIPS_LEFT GWS_LEFT SLACK < <(python3 -c "
+import json
+d = json.load(open('$TMPD/ctx.json'))
+a = d.get('chips_available', [])
+g = d.get('gameweeks_left_in_half') or 99
+print(len(a), g, g - len(a) if a else 99)
+")
 {
   # explicit time/gameweek anchor FIRST - the model must never have to guess
   printf '# You are deciding for: GAMEWEEK %s of the %s Premier League season\n' "$GW" "$SEASON_NAME"
@@ -39,6 +46,9 @@ SEASON_NAME=$(python3 -c "import json;print(json.load(open('$TMPD/ctx.json'))['s
     "$(date -u '+%A %d %B %Y, %H:%M UTC')" \
     "$(date -u -d "@$DEADLINE" '+%A %d %B %Y, %H:%M UTC')"
   printf 'All research and every conclusion must target exactly this gameweek and season - include "%s" and "gameweek %s" in your web searches.\n\n' "$SEASON_NAME" "$GW"
+  if (( SLACK <= 2 )); then
+    printf 'ESCALATION: you still hold %s chip(s) with only %s gameweek(s) left in this half (slack %s). Chips not played before the half ends are forfeited - worth exactly zero. Holding is now the RISKY choice: map each remaining chip to the best remaining week, and if this week is it, or no clearly better week remains, play.\n\n' "$CHIPS_LEFT" "$GWS_LEFT" "$SLACK"
+  fi
   cat "$OPS_LIB_DIR/chip_prompt.md"
   printf '\n## Context data (JSON)\n\n'
   cat "$TMPD/ctx.json"

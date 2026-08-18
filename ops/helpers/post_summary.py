@@ -192,7 +192,10 @@ def cmd_telegram(args) -> None:
     if args.bank_before and args.bank_before != bank:
         bank = f"{args.bank_before} ➜ {bank}"
     lines.append("")
-    lines.append(f"\U0001f0cf chip: {chip or 'none'}")
+    chip_line = f"\U0001f0cf chip: {chip or 'none'}"
+    if args.chip_note:
+        chip_line += f" {esc(args.chip_note)}"
+    lines.append(chip_line)
     lines.append(f"\U0001f4b0 bank: {bank}")
     if args.pred:
         lines.append(f"\U0001f4c8 pred: {esc(args.pred)}")
@@ -290,6 +293,7 @@ def main() -> None:
     p.add_argument("--pred", default="")
     p.add_argument("--bank-before", default="")
     p.add_argument("--pre-picks", default="", help="JSON file of pre-apply element ids")
+    p.add_argument("--chip-note", default="", help="appended to the chip line")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_telegram)
 

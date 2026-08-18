@@ -28,6 +28,14 @@ API_CHIP_NAMES = {
     "3xc": "triple_captain",
 }
 MIN_CONFIDENCE = 0.6
+MIN_CONFIDENCE_URGENT = 0.5  # when chips are close to expiring (slack <= 2)
+
+
+def confidence_threshold(slack: int | None) -> float:
+    if slack is not None and slack <= 2:
+        return MIN_CONFIDENCE_URGENT
+    return MIN_CONFIDENCE
+
 
 STATE_FILE = (
     Path(os.environ.get("AIRSENAL_DATA_ROOT", str(Path.home() / "airsenal-data")))
@@ -340,13 +348,17 @@ def cmd_validate(args) -> None:
     except json.JSONDecodeError:
         print("none")
         return
+    available = ctx.get("chips_available", [])
+    slack = None
+    if ctx.get("gameweeks_left_in_half") is not None and available:
+        slack = ctx["gameweeks_left_in_half"] - len(available)
     chip = decision.get("chip")
     confidence = decision.get("confidence", 0)
     if (
         decision.get("play_chip") is True
-        and chip in ctx.get("chips_available", [])
+        and chip in available
         and isinstance(confidence, (int, float))
-        and confidence >= MIN_CONFIDENCE
+        and confidence >= confidence_threshold(slack)
     ):
         print(chip)
     else:
@@ -398,6 +410,20 @@ def cmd_reasoning(args) -> None:
         print(e.get("reasoning", ""))
 
 
+def cmd_slack(args) -> None:
+    """Print 'chips_left gws_left slack' for the current half (public API only)."""
+    from airsenal.framework.utils import CURRENT_SEASON, fetcher
+
+    team_id = int(os.environ["FPL_TEAM_ID"])
+    played = chips_played_from_api(fetcher, team_id)
+    available, _ = compute_available_chips(
+        args.gw, CURRENT_SEASON, played, load_state()["entries"]
+    )
+    _, hi = half_range(args.gw)
+    gws_left = hi - args.gw + 1
+    print(len(available), gws_left, gws_left - len(available))
+
+
 def cmd_chip_for_gw(args) -> None:
     e = entry_for_gw(load_state(), args.gw)
     if e and e.get("chip") and not e.get("lapsed"):
@@ -442,6 +468,10 @@ def main() -> None:
     p = sub.add_parser("chip-for-gw")
     p.add_argument("--gw", type=int, required=True)
     p.set_defaults(func=cmd_chip_for_gw)
+
+    p = sub.add_parser("slack")
+    p.add_argument("--gw", type=int, required=True)
+    p.set_defaults(func=cmd_slack)
 
     args = parser.parse_args()
     args.func(args)

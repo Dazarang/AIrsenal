@@ -254,6 +254,13 @@ TG_ARGS=(--gw "$GW" --team-id "$FPL_TEAM_ID" --mode "($APPLY_MODE)")
 [[ -n "$PRED_PTS" ]] && TG_ARGS+=(--pred "$PRED_PTS")
 [[ -n "$PRE_BANK" ]] && TG_ARGS+=(--bank-before "$PRE_BANK")
 [[ -s "$TMP/pre_picks.json" ]] && TG_ARGS+=(--pre-picks "$TMP/pre_picks.json")
+# chip stock visibility: "(N unused, M GWs left in half)" on every summary
+SLACK_INFO=$("$PY" "$OPS_LIB_DIR/helpers/gw_context.py" slack --gw "$GW" 2>/dev/null || echo "")
+CHIPS_LEFT=""; GWS_LEFT=""; SLACK=""
+if [[ -n "$SLACK_INFO" ]]; then
+  read -r CHIPS_LEFT GWS_LEFT SLACK <<<"$SLACK_INFO"
+  (( CHIPS_LEFT > 0 )) && TG_ARGS+=(--chip-note "(${CHIPS_LEFT} unused, ${GWS_LEFT} GWs left in half)")
+fi
 if MSG=$("$PY" "$OPS_LIB_DIR/helpers/post_summary.py" telegram "${TG_ARGS[@]}"); then
   notify_html_soft "${PREFIX}${MSG}"
 else
@@ -271,6 +278,11 @@ elif [[ "$CHIP" == "wildcard" || "$CHIP" == "free_hit" ]]; then
   else
     notify_soft "${PREFIX}ACTION REQUIRED - AIrsenal GW${GW}: ${CHIP} was requested via the API but NOT confirmed on your team. Activate it manually on fantasy.premierleague.com before ${DL_LOCAL} ($(mins_left)m left) or the transfers will cost a points hit."
   fi
+fi
+
+# anti-hoarding backstop: chips about to expire and research still holding
+if [[ "$CHIP" == "none" && -n "$SLACK" ]] && (( CHIPS_LEFT > 0 && SLACK <= 2 )); then
+  notify_soft "${PREFIX}AIrsenal GW${GW} CHIP WARNING: ${CHIPS_LEFT} chip(s) unused with only ${GWS_LEFT} gameweek(s) left in this half, and research chose none again. Chips expire worthless - consider playing one manually on fantasy.premierleague.com."
 fi
 
 (( DRY_RUN )) || touch "$S.done"

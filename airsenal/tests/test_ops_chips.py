@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[2] / "ops" / "helpers"))
-from gw_context import CHIPS, compute_available_chips
+from gw_context import CHIPS, compute_available_chips, confidence_threshold
 
 SEASON = "2627"
 
@@ -88,3 +88,11 @@ def test_old_season_entries_ignored():
     entries = [{"chip": "wildcard", "gw": 8, "season": "2526", "confirmed": True}]
     available, _ = compute_available_chips(8, SEASON, [], entries)
     assert "wildcard" in available
+
+
+def test_confidence_threshold_relaxes_near_expiry():
+    assert confidence_threshold(None) == 0.6
+    assert confidence_threshold(10) == 0.6
+    assert confidence_threshold(3) == 0.6
+    assert confidence_threshold(2) == 0.5
+    assert confidence_threshold(0) == 0.5

@@ -215,9 +215,6 @@ elif [[ "$APPLY_MODE" == "transfers" ]]; then
 else
   "$VENV_BIN/airsenal_set_lineup" --fpl_team_id "$FPL_TEAM_ID" --confirm | tee "$TMP/apply.out"
 fi
-# captain comes from the optimization output: with --confirm nothing in the
-# apply step ever prints the squad
-CAPTAIN=$(grep -m1 "(C)$" "$TMP/optimization.out" 2>/dev/null | sed -e 's/ *(C)$//' -e 's/^ *//' || true)
 
 # --- step 10: server-side verification (warning-only; .applied already set) ---
 CURRENT_STEP="server-side verification"
@@ -234,13 +231,15 @@ fi
 # --- step 11: report ----------------------------------------------------------
 CURRENT_STEP="report"
 DL_LOCAL=$(TZ=Europe/Stockholm date -d "@$DEADLINE" '+%a %H:%M')
-MSG="${PREFIX}AIrsenal GW${GW} done ($APPLY_MODE)
+TG_ARGS=(--gw "$GW" --team-id "$FPL_TEAM_ID" --mode "($APPLY_MODE)")
+(( DRY_RUN )) && TG_ARGS+=(--dry-run)
+[[ -n "$PRED_PTS" ]] && TG_ARGS+=(--pred "$PRED_PTS (${WEEKS_AHEAD:-3}gw)")
+if MSG=$("$PY" "$OPS_LIB_DIR/helpers/post_summary.py" telegram "${TG_ARGS[@]}"); then
+  notify_html_soft "${PREFIX}${MSG}"
+else
+  notify_soft "${PREFIX}AIrsenal GW${GW} done ($APPLY_MODE)
 $SUMMARY"
-[[ -n "$PRED_PTS" ]] && MSG="$MSG
-predicted: $PRED_PTS (${WEEKS_AHEAD:-3}gw)"
-[[ -n "$CAPTAIN" ]] && MSG="$MSG
-captain: $CAPTAIN"
-notify_soft "$MSG"
+fi
 
 if [[ "$CHIP" == "triple_captain" || "$CHIP" == "bench_boost" ]]; then
   REASONING=$("$PY" "$OPS_LIB_DIR/helpers/gw_context.py" reasoning --gw "$GW" || true)

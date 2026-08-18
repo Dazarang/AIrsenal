@@ -28,9 +28,10 @@ mkdir -p "$RUN_DIR" "$LOG_DIR" "$STATE_DIR" "$BACKUP_DIR"
 
 # Send a Telegram message using the pquant bot credentials (read-only access
 # to the pquant env file; that file is never modified). Truncates to the
-# Telegram 4096-char limit. Returns nonzero on delivery failure.
-notify() {
-  local msg="$1"
+# Telegram 4096-char limit. Returns nonzero on delivery failure (incl. HTTP
+# errors such as HTML parse rejections, via curl -f).
+_send_telegram() {
+  local msg="$1" mode="${2:-}"
   local token chat
   token=$(grep -m1 '^TELEGRAM_BOT_TOKEN=' "$PQUANT_ENV_FILE" | cut -d= -f2- | tr -d '"' | tr -d "'")
   chat=$(grep -m1 '^TELEGRAM_CHAT_ID=' "$PQUANT_ENV_FILE" | cut -d= -f2- | tr -d '"' | tr -d "'")
@@ -38,13 +39,24 @@ notify() {
     echo "notify: TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not found in $PQUANT_ENV_FILE" >&2
     return 1
   fi
-  curl -sS --max-time 20 -X POST "https://api.telegram.org/bot${token}/sendMessage" \
-    -d chat_id="${chat}" --data-urlencode text="${msg:0:4000}" >/dev/null
+  local args=(-d chat_id="${chat}" --data-urlencode text="${msg:0:4000}")
+  [[ -n "$mode" ]] && args+=(-d parse_mode="$mode")
+  curl -sSf --max-time 20 -X POST "https://api.telegram.org/bot${token}/sendMessage" \
+    "${args[@]}" >/dev/null
 }
+
+notify() { _send_telegram "$1"; }
 
 # notify that must never kill the caller
 notify_soft() {
   notify "$1" || echo "notify failed: $1" >&2
+}
+
+# HTML-formatted notify; falls back to tag-stripped plain text on rejection
+notify_html_soft() {
+  if ! _send_telegram "$1" HTML; then
+    notify_soft "$(sed 's/<[^>]*>//g' <<<"$1")"
+  fi
 }
 
 log() {

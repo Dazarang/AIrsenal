@@ -93,6 +93,86 @@ def cmd_check(args) -> None:
     )
 
 
+def cmd_telegram(args) -> None:
+    """Build the HTML-formatted Telegram summary for a completed run."""
+    import html as html_mod
+
+    from airsenal.framework.utils import (
+        CURRENT_SEASON,
+        fetcher,
+        get_bank,
+        get_player_from_api_id,
+        get_player_name,
+        session,
+    )
+    from airsenal.scripts.get_transfer_suggestions import get_transfer_suggestions
+
+    esc = html_mod.escape
+    lines = [f"<b>AIrsenal GW{args.gw}</b> {esc(args.mode)}".rstrip()]
+
+    rows = get_transfer_suggestions(
+        session, gameweek=args.gw, season=CURRENT_SEASON, fpl_team_id=args.team_id
+    )
+    outs = [str(get_player_name(r.player_id)) for r in rows if r.in_or_out < 0]
+    ins = [str(get_player_name(r.player_id)) for r in rows if r.in_or_out >= 0]
+    chip = rows[0].chip_played if rows else None
+
+    picks: list[dict] = []
+    if not args.dry_run:
+        try:
+            picks = sorted(
+                fetcher.get_current_picks(args.team_id), key=lambda p: p["position"]
+            )
+        except Exception as e:
+            print(f"could not fetch picks: {e}", file=sys.stderr)
+
+    if picks:
+
+        def label(p: dict) -> tuple[str, str | None]:
+            player = get_player_from_api_id(p["element"])
+            name = esc(str(player)) if player else str(p["element"])
+            if p.get("is_captain"):
+                name += " (C)"
+            elif p.get("is_vice_captain"):
+                name += " (VC)"
+            return name, player.position(CURRENT_SEASON) if player else None
+
+        starters = [label(p) for p in picks[:11]]
+        bench = [label(p)[0] for p in picks[11:]]
+        lines.append("")
+        lines.append("<b>Starting XI</b>")
+        for pos in ("GK", "DEF", "MID", "FWD"):
+            names = [n for n, p_pos in starters if p_pos == pos]
+            if names:
+                lines.append(f"{pos}: {', '.join(names)}")
+        if bench:
+            lines.append(f"<b>Bench:</b> {', '.join(bench)}")
+
+    lines.append("")
+    if outs:
+        lines.append(f"<b>Transfers ({len(outs)})</b>")
+        lines.extend(
+            f"OUT {esc(o)} -> IN {esc(i)}" for o, i in zip(outs, ins, strict=False)
+        )
+    elif ins:
+        lines.append(f"<b>Initial squad picked ({len(ins)})</b>")
+        if not picks:
+            lines.append(esc(", ".join(ins)))
+    else:
+        lines.append("<b>Transfers:</b> none")
+
+    try:
+        bank = f"{get_bank(fpl_team_id=args.team_id) / 10:.1f}"
+    except Exception:
+        bank = "?"
+    footer = f"chip: {chip or 'none'} | bank: {bank}"
+    if args.pred:
+        footer += f" | pred: {esc(args.pred)}"
+    lines.append("")
+    lines.append(footer)
+    print("\n".join(lines))
+
+
 def applied_transfer_count(team_id: int, gw: int) -> int:
     from airsenal.framework.utils import fetcher
 
@@ -157,6 +237,14 @@ def main() -> None:
     p.add_argument("--team-id", type=int, required=True)
     p.add_argument("--since", required=True)
     p.set_defaults(func=cmd_check)
+
+    p = sub.add_parser("telegram")
+    p.add_argument("--gw", type=int, required=True)
+    p.add_argument("--team-id", type=int, required=True)
+    p.add_argument("--mode", default="")
+    p.add_argument("--pred", default="")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=cmd_telegram)
 
     p = sub.add_parser("transfer-count")
     p.add_argument("--gw", type=int, required=True)

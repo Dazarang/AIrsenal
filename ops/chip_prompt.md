@@ -17,15 +17,27 @@ for the coming gameweeks (blank/double gameweek detection).
   free_hit cannot be played in GW20.
 - Only chips listed in `chips_available` may be chosen.
 
-## Your research
+## Your research — MANDATORY, live web search only
 
-Use web search to check, for THIS gameweek:
-1. Injury/rotation/suspension news for the squad players flagged in the
-   context and premium captaincy options (press conferences, reliable FPL news
-   sites).
-2. Whether the FPL community consensus sees this as a chip week (blank/double
-   gameweek strategy articles for the current gameweek).
-3. Fixture difficulty for the top teams this gameweek.
+Your training data predates this Premier League season. Squads, transfers,
+injuries, managers, form and fixtures have all changed since then. Do NOT
+state or rely on any fact about the current season from memory — every
+season-specific claim in your reasoning must come from a web search result
+you made in this session, and recent enough to matter (this week for injury
+news).
+
+Search the web for, at minimum:
+1. Injury/rotation/suspension news for the squad players in the context and
+   for premium captaincy options (latest press conferences, reliable FPL news
+   sites). Cross-check the injury flags in the context data against current
+   news.
+2. Current FPL community chip strategy for THIS specific gameweek (search
+   e.g. "FPL gameweek <N> chip strategy" with the current season) — is this
+   widely seen as a chip week, and why?
+3. This gameweek's fixtures and difficulty for the top teams.
+
+If your searches fail or return nothing useful, say so in the reasoning and
+output play_chip: false — never fall back to memory.
 
 ## Decision policy
 

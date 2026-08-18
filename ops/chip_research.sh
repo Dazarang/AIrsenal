@@ -33,9 +33,18 @@ fi
 
 {
   cat "$OPS_LIB_DIR/chip_prompt.md"
-  printf '\n\n## Context data (JSON)\n\n'
+  printf '\n\nToday is %s. The deadline is %s.\n' \
+    "$(date -u '+%A %d %B %Y, %H:%M UTC')" \
+    "$(date -u -d "@$DEADLINE" '+%A %d %B %Y, %H:%M UTC')"
+  printf '\n## Context data (JSON)\n\n'
   cat "$TMPD/ctx.json"
 } > "$TMPD/prompt.txt"
+
+# persist research artifacts for auditability (prompt, envelope, decision)
+CHIP_LOG_DIR="$LOG_DIR/chip"
+mkdir -p "$CHIP_LOG_DIR"
+RESEARCH_TS=$(date +%Y%m%dT%H%M%S)
+cp "$TMPD/prompt.txt" "$CHIP_LOG_DIR/gw${GW}-${RESEARCH_TS}.prompt.txt"
 
 echo "chip research: running claude (opus @ xhigh)..." >&2
 CLAUDE_OK=0
@@ -55,6 +64,15 @@ for attempt in 1 2; do
   (( attempt == 1 )) && sleep 60
 done
 (( CLAUDE_OK )) || fail "claude run failed twice or timed out"
+cp "$TMPD/claude.json" "$CHIP_LOG_DIR/gw${GW}-${RESEARCH_TS}.claude.json"
+
+# how much live research actually happened? (0 searches = training-data-only)
+SEARCHES=$(python3 -c "
+import json
+u = json.load(open('$TMPD/claude.json')).get('usage', {}).get('server_tool_use', {})
+print(int(u.get('web_search_requests', 0) or 0) + int(u.get('web_fetch_requests', 0) or 0))
+" 2>/dev/null || echo 0)
+echo "chip research: $SEARCHES web search/fetch requests" >&2
 
 # claude's JSON envelope -> result text -> first JSON object inside it
 python3 - "$TMPD/claude.json" > "$TMPD/decision.json" <<'EOF' || fail "could not parse claude output"
@@ -75,8 +93,17 @@ for i, ch in enumerate(result):
 raise SystemExit(1)
 EOF
 
+cp "$TMPD/decision.json" "$CHIP_LOG_DIR/gw${GW}-${RESEARCH_TS}.decision.json"
+
 CHIP=$("$PY" "$OPS_LIB_DIR/helpers/gw_context.py" validate \
   --context "$TMPD/ctx.json" < "$TMPD/decision.json") || fail "decision validation failed"
+
+# a decision to PLAY a chip that did zero live research is not trustworthy
+if [[ "$CHIP" != "none" ]] && (( SEARCHES == 0 )); then
+  notify_soft "AIrsenal GW${GW}: chip research suggested ${CHIP} but performed ZERO web searches (training data only) - rejecting the decision, no chip will be played." >&2
+  echo "chip research: rejected $CHIP (0 searches)" >&2
+  CHIP="none"
+fi
 
 if [[ "$CHIP" != "none" ]]; then
   SEASON=$(python3 -c "import json;print(json.load(open('$TMPD/ctx.json'))['season'])")

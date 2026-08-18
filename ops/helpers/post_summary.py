@@ -108,7 +108,8 @@ def cmd_telegram(args) -> None:
     from airsenal.scripts.get_transfer_suggestions import get_transfer_suggestions
 
     esc = html_mod.escape
-    lines = [f"<b>AIrsenal GW{args.gw}</b> {esc(args.mode)}".rstrip()]
+    pos_emoji = {"GK": "\U0001f9e4", "DEF": "\U0001f6e1", "MID": "⚡", "FWD": "⚽"}
+    lines = [f"\U0001f916 <b>AIrsenal GW{args.gw}</b> {esc(args.mode)}".rstrip()]
 
     rows = get_transfer_suggestions(
         session, gameweek=args.gw, season=CURRENT_SEASON, fpl_team_id=args.team_id
@@ -133,6 +134,16 @@ def cmd_telegram(args) -> None:
             except Exception as e:
                 print(f"picks fetch attempt {attempt + 1} failed: {e}", file=sys.stderr)
 
+    def squad_section(grouped: dict[str, list[str]], bench: list[str]) -> None:
+        for pos in ("GK", "DEF", "MID", "FWD"):
+            if grouped.get(pos):
+                lines.append(f"<b>{pos_emoji[pos]} {pos}</b>")
+                lines.append(" | ".join(grouped[pos]))
+        if bench:
+            lines.append("<b>\U0001fa91 Bench</b>")
+            lines.append(" | ".join(bench))
+
+    lines.append("")
     if picks:
 
         def label(p: dict) -> tuple[str, str | None]:
@@ -144,39 +155,40 @@ def cmd_telegram(args) -> None:
                 name += " (VC)"
             return name, player.position(CURRENT_SEASON) if player else None
 
-        starters = [label(p) for p in picks[:11]]
-        bench = [label(p)[0] for p in picks[11:]]
-        lines.append("")
-        lines.append("<b>Starting XI</b>")
-        for pos in ("GK", "DEF", "MID", "FWD"):
-            names = [n for n, p_pos in starters if p_pos == pos]
-            if names:
-                lines.append(f"{pos}: {', '.join(names)}")
-        if bench:
-            lines.append(f"<b>Bench:</b> {', '.join(bench)}")
-
-    lines.append("")
-    if outs:
-        lines.append(f"<b>Transfers ({len(outs)})</b>")
-        lines.extend(
-            f"OUT {esc(o)} -> IN {esc(i)}" for o, i in zip(outs, ins, strict=False)
-        )
+        grouped: dict[str, list[str]] = {}
+        for name, pos in (label(p) for p in picks[:11]):
+            grouped.setdefault(pos, []).append(name)
+        squad_section(grouped, [label(p)[0] for p in picks[11:]])
     elif ins:
-        lines.append(f"<b>Initial squad picked ({len(ins)})</b>")
-        if not picks:
-            lines.append(esc(", ".join(ins)))
-    else:
-        lines.append("<b>Transfers:</b> none")
+        # dry run / picks unavailable: show the suggested squad instead
+        from airsenal.framework.utils import get_player
+
+        grouped = {}
+        for r in rows:
+            if r.in_or_out >= 0 and (player := get_player(r.player_id)):
+                grouped.setdefault(player.position(CURRENT_SEASON), []).append(
+                    esc(player.name)
+                )
+        squad_section(grouped, [])
+
+    if outs:
+        lines.append("")
+        lines.append(f"<b>\U0001f504 Transfers ({len(outs)})</b>")
+        lines.extend(
+            f"OUT {esc(o)} ➜ IN {esc(i)}" for o, i in zip(outs, ins, strict=False)
+        )
 
     try:
         bank = f"{get_bank(fpl_team_id=args.team_id) / 10:.1f}"
     except Exception:
         bank = "?"
-    footer = f"chip: {chip or 'none'} | bank: {bank}"
-    if args.pred:
-        footer += f" | pred: {esc(args.pred)}"
+    if args.bank_before and args.bank_before != bank:
+        bank = f"{args.bank_before} ➜ {bank}"
     lines.append("")
-    lines.append(footer)
+    lines.append(f"\U0001f0cf chip: {chip or 'none'}")
+    lines.append(f"\U0001f4b0 bank: {bank}")
+    if args.pred:
+        lines.append(f"\U0001f4c8 pred: {esc(args.pred)}")
     print("\n".join(lines))
 
 
@@ -250,6 +262,7 @@ def main() -> None:
     p.add_argument("--team-id", type=int, required=True)
     p.add_argument("--mode", default="")
     p.add_argument("--pred", default="")
+    p.add_argument("--bank-before", default="")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_telegram)
 

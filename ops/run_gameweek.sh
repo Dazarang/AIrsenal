@@ -180,6 +180,10 @@ if (( $(mins_left) < 3 )); then
   exit 1
 fi
 PRE_COUNT=$("$PY" "$OPS_LIB_DIR/helpers/post_summary.py" transfer-count --gw "$GW" --team-id "$FPL_TEAM_ID")
+PRE_BANK=$("$PY" -c "
+from airsenal.framework.utils import get_bank
+print(f'{get_bank(fpl_team_id=$FPL_TEAM_ID) / 10:.1f}')
+" 2>/dev/null || echo "")
 APPLY_MODE="transfers"
 [[ "$NEW_ROWS" != "True" ]] && APPLY_MODE="lineup-only (stale suggestions guard)"
 (( N_TRANSFERS == 0 )) && [[ "$CHIP" == "none" ]] && APPLY_MODE="lineup-only (no transfers suggested)"
@@ -242,7 +246,8 @@ CURRENT_STEP="report"
 DL_LOCAL=$(TZ=Europe/Stockholm date -d "@$DEADLINE" '+%a %H:%M')
 TG_ARGS=(--gw "$GW" --team-id "$FPL_TEAM_ID" --mode "($APPLY_MODE)")
 (( DRY_RUN )) && TG_ARGS+=(--dry-run)
-[[ -n "$PRED_PTS" ]] && TG_ARGS+=(--pred "$PRED_PTS (${WEEKS_AHEAD:-3}gw)")
+[[ -n "$PRED_PTS" ]] && TG_ARGS+=(--pred "$PRED_PTS")
+[[ -n "$PRE_BANK" ]] && TG_ARGS+=(--bank-before "$PRE_BANK")
 if MSG=$("$PY" "$OPS_LIB_DIR/helpers/post_summary.py" telegram "${TG_ARGS[@]}"); then
   notify_html_soft "${PREFIX}${MSG}"
 else

@@ -54,11 +54,14 @@ echo "chip research: running claude (opus @ max)..." >&2
 CLAUDE_OK=0
 for attempt in 1 2; do
   # prompt via stdin, not argv (context JSON can grow; argv has ARG_MAX limits)
-  if timeout -k 30 900 "$CLAUDE_BIN" -p \
+  # generous limits: the deadline window is 3h and the rest of the pipeline
+  # needs ~10 min, so research is never the bottleneck - these are runaway
+  # stops, not schedule pressure
+  if timeout -k 60 2400 "$CLAUDE_BIN" -p \
       --model opus --effort max \
       --output-format json \
       --dangerously-skip-permissions \
-      --max-turns 30 \
+      --max-turns 100 \
       < "$TMPD/prompt.txt" > "$TMPD/claude.json" 2>"$TMPD/claude.err"; then
     CLAUDE_OK=1
     break

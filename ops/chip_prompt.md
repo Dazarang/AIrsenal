@@ -76,11 +76,11 @@ discard the rest, and corroborate anything decisive with a second source.
 Ignore ownership %, transfer leaderboards, price-change predictors and pundit
 tips: they cost turns and decide nothing.
 
-Budget: 6-10 searches/fetches, under 8 minutes. The run is killed at 30 turns
-or 15 minutes and the decision is then lost entirely — once you can decide, or
-after ~10 tool calls, stop researching and output the JSON. If your searches
-fail or return nothing usable, say so and output play_chip:false. Never fall
-back to memory.
+Research thoroughly — depth beats speed here, and there is ample time. Typical
+good runs use 6-15 searches/fetches; use more if the situation is genuinely
+ambiguous. Stop when further research would no longer change your decision,
+then output the JSON. If your searches fail or return nothing usable, say so
+and output play_chip:false. Never fall back to memory.
 
 ## Deciding
 

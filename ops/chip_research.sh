@@ -6,18 +6,38 @@
 # All logging goes to stderr. Research failures never abort the pipeline -
 # the safe default is "none".
 #
-# Usage: chip_research.sh <gameweek> <deadline_epoch>
+# Usage: chip_research.sh <gameweek> <deadline_epoch> [--dry-run]
+#   --dry-run: no decision recorded, Telegram messages prefixed [DRY RUN]
 set -uo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 GW="${1:?gameweek required}"
 DEADLINE="${2:?deadline epoch required}"
+DRY_RUN=0
+[[ "${3:-}" == "--dry-run" ]] && DRY_RUN=1
+PREFIX=""
+(( DRY_RUN )) && PREFIX="[DRY RUN] "
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
 
+# the gameweek's decision: "record" replaces any earlier unconfirmed one,
+# "clear" drops it - so a re-run that ends without a chip (including every
+# failure path) cannot leave a stale chip behind for the reminder / retry paths
+record() {
+  (( DRY_RUN )) && return 0
+  "$PY" "$OPS_LIB_DIR/helpers/gw_context.py" record \
+    --gw "$GW" --season "$SEASON" --chip "$1" \
+    --confidence "${2:-0}" --reasoning="${3:-}"
+}
+clear_decision() {
+  (( DRY_RUN )) && return 0
+  "$PY" "$OPS_LIB_DIR/helpers/gw_context.py" clear --gw "$GW"
+}
+
 fail() {
   echo "chip research: $1" >&2
-  notify_soft "AIrsenal GW${GW}: chip research skipped - $1. Continuing without a chip." >&2
+  clear_decision || echo "chip research: could not clear the recorded decision" >&2
+  notify_soft "${PREFIX}AIrsenal GW${GW}: chip research skipped - $1. Continuing without a chip." >&2
   echo "none"
   exit 0
 }
@@ -31,14 +51,29 @@ fi
   --gw "$GW" --deadline-epoch "$DEADLINE" > "$TMPD/ctx.json" \
   || fail "context generation failed"
 
-SEASON_NAME=$(python3 -c "import json;print(json.load(open('$TMPD/ctx.json'))['season_name'])")
-read -r CHIPS_LEFT GWS_LEFT SLACK < <(python3 -c "
+read -r SEASON SEASON_NAME CHIPS_LEFT GWS_LEFT SLACK ACTIVE < <(python3 -c "
 import json
 d = json.load(open('$TMPD/ctx.json'))
-a = d.get('chips_available', [])
+a = d['chips_available']
 g = d.get('gameweeks_left_in_half') or 99
-print(len(a), g, g - len(a) if a else 99)
-")
+print(d['season'], d['season_name'], len(a), g, g - len(a) if a else 99, d.get('active_chip') or '-')
+") || fail "context JSON unreadable"
+
+if [[ "$ACTIVE" != "-" ]]; then
+  # a chip is already active on the FPL site (activated by hand, or by an
+  # earlier attempt): optimize for it instead of researching another
+  echo "chip research: $ACTIVE is already active on the team - no research needed" >&2
+  record "$ACTIVE" 1 "already active on the FPL site" || fail "recording the active chip failed"
+  echo "$ACTIVE"
+  exit 0
+fi
+if (( CHIPS_LEFT == 0 )); then
+  echo "chip research: no chip available this gameweek - nothing to research" >&2
+  clear_decision || fail "clearing the decision failed"
+  echo "none"
+  exit 0
+fi
+
 {
   # explicit time/gameweek anchor FIRST - the model must never have to guess
   printf '# You are deciding for: GAMEWEEK %s of the %s Premier League season\n' "$GW" "$SEASON_NAME"
@@ -60,15 +95,19 @@ mkdir -p "$CHIP_LOG_DIR"
 RESEARCH_TS=$(date +%Y%m%dT%H%M%S)
 cp "$TMPD/prompt.txt" "$CHIP_LOG_DIR/gw${GW}-${RESEARCH_TS}.prompt.txt"
 
-echo "chip research: running claude (opus @ max)..." >&2
+# runaway stop, not schedule pressure: up to 40 min per attempt when the
+# window allows, shrinking so that research never eats into the ~30 min the
+# rest of the pipeline needs (a retry attempt starts with less of the window)
+BUDGET=$(( (DEADLINE - $(date +%s) - 30 * 60) / 2 ))
+(( BUDGET < 300 )) && fail "not enough time left before the deadline for research"
+(( BUDGET > 2400 )) && BUDGET=2400
+
+echo "chip research: running claude (opus @ max, up to ${BUDGET}s per attempt)..." >&2
 CLAUDE_OK=0
 for attempt in 1 2; do
   # prompt via stdin, not argv (context JSON can grow; argv has ARG_MAX limits)
-  # generous limits: the deadline window is 3h and the rest of the pipeline
-  # needs ~10 min, so research is never the bottleneck - these are runaway
-  # stops, not schedule pressure
   # research never needs these secrets - keep them out of the headless env
-  if timeout -k 60 2400 env -u TELEGRAM_BOT_TOKEN -u FPL_PASSWORD "$CLAUDE_BIN" -p \
+  if timeout -k 60 "$BUDGET" env -u TELEGRAM_BOT_TOKEN -u TELEGRAM_CHAT_ID -u FPL_PASSWORD -u FPL_LOGIN "$CLAUDE_BIN" -p \
       --model opus --effort max \
       --output-format json \
       --dangerously-skip-permissions \
@@ -85,10 +124,15 @@ done
 cp "$TMPD/claude.json" "$CHIP_LOG_DIR/gw${GW}-${RESEARCH_TS}.claude.json"
 
 # how much live research actually happened? (0 searches = training-data-only)
+# searches run by tool subagents are only counted under modelUsage, per model;
+# usage.server_tool_use covers the main model alone
 SEARCHES=$(python3 -c "
 import json
-u = json.load(open('$TMPD/claude.json')).get('usage', {}).get('server_tool_use', {})
-print(int(u.get('web_search_requests', 0) or 0) + int(u.get('web_fetch_requests', 0) or 0))
+d = json.load(open('$TMPD/claude.json'))
+by_model = sum(int(m.get('webSearchRequests') or 0) for m in (d.get('modelUsage') or {}).values())
+u = d.get('usage', {}).get('server_tool_use', {})
+direct = int(u.get('web_search_requests') or 0) + int(u.get('web_fetch_requests') or 0)
+print(max(by_model, direct))
 " 2>/dev/null || echo 0)
 echo "chip research: $SEARCHES web search/fetch requests" >&2
 
@@ -118,19 +162,21 @@ CHIP=$("$PY" "$OPS_LIB_DIR/helpers/gw_context.py" validate \
 
 # a decision to PLAY a chip that did almost no live research is not trustworthy
 if [[ "$CHIP" != "none" ]] && (( SEARCHES < 2 )); then
-  notify_soft "AIrsenal GW${GW}: chip research suggested ${CHIP} but performed only ${SEARCHES} web lookups (training data risk) - rejecting the decision, no chip will be played." >&2
+  notify_soft "${PREFIX}AIrsenal GW${GW}: chip research suggested ${CHIP} but performed only ${SEARCHES} web lookups (training data risk) - rejecting the decision, no chip will be played." >&2
   echo "chip research: rejected $CHIP (${SEARCHES} lookups)" >&2
   CHIP="none"
 fi
 
-if [[ "$CHIP" != "none" ]]; then
-  SEASON=$(python3 -c "import json;print(json.load(open('$TMPD/ctx.json'))['season'])")
-  REASONING=$(python3 -c "import json;print(json.load(open('$TMPD/decision.json')).get('reasoning',''))")
-  CONF=$(python3 -c "import json;print(json.load(open('$TMPD/decision.json')).get('confidence',0))")
-  "$PY" "$OPS_LIB_DIR/helpers/gw_context.py" record \
-    --gw "$GW" --season "$SEASON" --chip "$CHIP" \
-    --confidence "$CONF" --reasoning "$REASONING" \
-    || fail "recording the decision failed (a confirmed chip already exists?)"
+if [[ "$CHIP" == "none" ]]; then
+  clear_decision || fail "clearing the decision failed"
+else
+  read -r CONF REASONING < <(python3 -c "
+import json
+d = json.load(open('$TMPD/decision.json'))
+print(d.get('confidence', 0), str(d.get('reasoning', '')).replace('\n', ' '))
+") || { CONF=0; REASONING=""; }
+  record "$CHIP" "$CONF" "$REASONING" \
+    || fail "recording the decision failed (a different chip is already confirmed?)"
   echo "chip research: recorded decision $CHIP (confidence $CONF)" >&2
 fi
 

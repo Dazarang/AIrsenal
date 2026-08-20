@@ -289,6 +289,9 @@ def build_init_priced_transfers(
         transfers_in.append({"element_in": api_id, "purchase_price": price})
     # remove duplicates - can't add a player we already have
     transfers_in, transfers_out = remove_duplicates(transfers_in, transfers_out)
+    if not transfers_in:
+        # the suggested squad is the one we already have
+        return []
     # re-order both lists so they go DEF, FWD, GK, MID
     transfers_in = sort_by_position(transfers_in)
     transfers_out = sort_by_position(transfers_out)
@@ -306,13 +309,19 @@ def build_transfer_payload(
         "entry": fetcher.FPL_TEAM_ID,
         "event": current_gw,
         "transfers": priced_transfers,
+        "chip": None,
         "wildcard": False,
         "freehit": False,
     }
-    # only wildcard/free_hit are valid fields on the transfers endpoint;
-    # triple_captain/bench_boost cannot be played via the API at all
+    # wildcard/free_hit are "transfer" chips: the FPL client plays them through
+    # this endpoint as `chip` (the boolean keys are the legacy form, kept for
+    # servers that still read them). triple_captain/bench_boost are "team"
+    # chips played through the my-team (lineup) endpoint instead - see
+    # set_lineup.active_team_chip - so they never belong in this payload.
     if chip_played in ("wildcard", "free_hit"):
-        transfer_payload[chip_played.replace("_", "")] = True
+        api_name = chip_played.replace("_", "")
+        transfer_payload["chip"] = api_name
+        transfer_payload[api_name] = True
 
     print(transfer_payload)
     return transfer_payload
@@ -345,6 +354,10 @@ def make_transfers(
             for i in range(len(sorted_transfers_out))
         ]
         post_transfer_bank = deduct_transfer_price(pre_transfer_bank, priced_transfers)
+
+    if not priced_transfers:
+        print("No transfers needed: the squad already matches the suggestions.")
+        return True
 
     print_output(
         team_id,

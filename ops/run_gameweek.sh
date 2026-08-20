@@ -5,7 +5,7 @@
 #
 # Usage: run_gameweek.sh <gameweek> <deadline_epoch> [--dry-run]
 #   --dry-run: full chain but no POSTs to the FPL API, no run markers,
-#              Telegram messages prefixed [DRY RUN].
+#              no chip decision recorded, Telegram messages prefixed [DRY RUN].
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -37,20 +37,17 @@ $(tail -15 "$LOG" 2>/dev/null)"
 }
 trap on_exit EXIT
 
-# single active run; a second invocation exits immediately
+# single active run; a second invocation exits immediately (the scheduler
+# probes this lock before launching, so this only triggers on a manual run).
+# Children inherit the lock fd on purpose: the run counts as in progress
+# until its last process has ended
 exec 9>"$RUN_DIR/airsenal.lock"
 if ! flock -n 9; then
   log "another run holds the lock, exiting"
-  # a blocked launch is not a real try - refund the attempt it consumed
-  a=$(cat "$S.attempts" 2>/dev/null || echo 1)
-  echo $(( a > 0 ? a - 1 : 0 )) > "$S.attempts"
-  if [[ ! -f "$S.lockblocked" ]]; then
-    notify_soft "${PREFIX}AIrsenal GW${GW}: launch blocked - another run still holds the lock (possibly a hung earlier run). Will keep retrying; check the Pi if this repeats."
-    touch "$S.lockblocked"
-  fi
+  notify_soft "${PREFIX}AIrsenal GW${GW}: launch blocked - another run holds the lock. Check the Pi if this repeats."
   exit 0
 fi
-# unconditional (incl. dry runs) so the scheduler's liveness check sees us
+# record of this run (pid, start, deadline); unconditional incl. dry runs
 echo "$$ $(date +%s) $DEADLINE" > "$S.started"
 
 mins_left() { echo $(( (DEADLINE - $(date +%s)) / 60 )); }
@@ -80,22 +77,14 @@ import sys
 sys.exit(0 if session.scalars(select(Player)).first() else 1)
 " || { log "FATAL: database is empty - run airsenal_setup_initial_db"; exit 1; }
 
+# the login flow is transiently flaky; FPLDataFetcher.login retries internally
 log "checking FPL login..."
-LOGIN_OK=0
-for login_try in 1 2 3; do
-  if "$PY" -c "
+"$PY" -c "
 from airsenal.framework.data_fetcher import FPLDataFetcher
 f = FPLDataFetcher()
 f.login()
 raise SystemExit(0 if f.logged_in else 1)
-"; then
-    LOGIN_OK=1
-    break
-  fi
-  log "login attempt $login_try failed (FPL login flow is transiently flaky), retrying..."
-  sleep 20
-done
-(( LOGIN_OK )) || { log "FATAL: FPL login failed 3x - credentials wrong or FPL changed their login flow"; exit 1; }
+" || { log "FATAL: FPL login failed - credentials wrong or FPL changed their login flow"; exit 1; }
 
 # --- step 2: database backup --------------------------------------------------
 CURRENT_STEP="database backup"
@@ -139,10 +128,12 @@ CURRENT_STEP="chip research"
 if [[ -f "$S.applied" || -f "$S.posted" ]]; then
   # transfers already POSTed on a previous attempt: reuse that decision,
   # never research a second chip for the same gameweek
-  CHIP=$(python3 "$OPS_LIB_DIR/helpers/gw_context.py" chip-for-gw --gw "$GW" || echo "none")
+  CHIP=$("$PY" "$OPS_LIB_DIR/helpers/gw_context.py" chip-for-gw --gw "$GW" || echo "none")
   log "reusing recorded chip decision: $CHIP (transfers already POSTed)"
 else
-  CHIP=$("$OPS_LIB_DIR/chip_research.sh" "$GW" "$DEADLINE" || echo "none")
+  RESEARCH_ARGS=("$GW" "$DEADLINE")
+  (( DRY_RUN )) && RESEARCH_ARGS+=(--dry-run)
+  CHIP=$("$OPS_LIB_DIR/chip_research.sh" "${RESEARCH_ARGS[@]}" || echo "none")
   CHIP=${CHIP##*$'\n'}  # last line only
 fi
 log "chip decision: $CHIP"
@@ -169,10 +160,19 @@ PRED_PTS=$(grep -m1 "Score with Strategy:" "$TMP/optimization.out" | grep -o "[0
 CURRENT_STEP="suggestion check"
 "$PY" "$OPS_LIB_DIR/helpers/post_summary.py" check \
   --gw "$GW" --team-id "$FPL_TEAM_ID" --since "$PRE_TS" > "$TMP/check.json"
-NEW_ROWS=$(python3 -c "import json;print(json.load(open('$TMP/check.json'))['new_rows'])")
-N_TRANSFERS=$(python3 -c "import json;print(json.load(open('$TMP/check.json'))['n_transfers'])")
-SUMMARY=$(python3 -c "import json;print(json.load(open('$TMP/check.json'))['text'])")
-log "new_rows=$NEW_ROWS n_transfers=$N_TRANSFERS"
+read -r NEW_ROWS N_TRANSFERS N_OUT PRE_BANK < <(python3 -c "
+import json
+d = json.load(open('$TMP/check.json'))
+print(d['new_rows'], d['n_transfers'], d['n_out'], d['bank'] or '')
+")
+log "new_rows=$NEW_ROWS n_transfers=$N_TRANSFERS n_out=$N_OUT bank=$PRE_BANK"
+if (( N_TRANSFERS == 0 )) && [[ "$CHIP" == "wildcard" || "$CHIP" == "free_hit" ]]; then
+  # a transfer chip with nothing to transfer is pointless: nothing would be
+  # POSTed, so it must not be reported or reminded as "to activate" either
+  log "$CHIP decided but no transfers suggested - not playing it"
+  (( DRY_RUN )) || "$PY" "$OPS_LIB_DIR/helpers/gw_context.py" clear --gw "$GW" || true
+  CHIP="none"
+fi
 
 # --- step 9: apply ------------------------------------------------------------
 CURRENT_STEP="apply transfers/lineup"
@@ -180,18 +180,23 @@ if (( $(mins_left) < 3 )); then
   log "FATAL: less than 3 minutes to deadline, refusing to POST"
   exit 1
 fi
-PRE_COUNT=$("$PY" "$OPS_LIB_DIR/helpers/post_summary.py" transfer-count --gw "$GW" --team-id "$FPL_TEAM_ID")
-PRE_BANK=$("$PY" -c "
-from airsenal.framework.utils import get_bank
-print(f'{get_bank(fpl_team_id=$FPL_TEAM_ID) / 10:.1f}')
-" 2>/dev/null || echo "")
 # pre-apply squad snapshot: the summary diffs this against the post-apply
-# squad to show the real moves on full-rebuild weeks (GW1, wildcard)
+# squad to show the real moves on full-rebuild weeks
 "$PY" "$OPS_LIB_DIR/helpers/post_summary.py" picks-elements --team-id "$FPL_TEAM_ID" \
   > "$TMP/pre_picks.json" 2>/dev/null || echo "[]" > "$TMP/pre_picks.json"
 APPLY_MODE="transfers"
-[[ "$NEW_ROWS" != "True" ]] && APPLY_MODE="lineup-only (stale suggestions guard)"
-(( N_TRANSFERS == 0 )) && [[ "$CHIP" == "none" ]] && APPLY_MODE="lineup-only (no transfers suggested)"
+if [[ "$NEW_ROWS" != "True" ]]; then
+  APPLY_MODE="lineup-only (stale suggestions guard)"
+elif (( N_TRANSFERS == 0 )); then
+  APPLY_MODE="lineup-only (no transfers suggested)"
+elif (( GW > 1 && N_OUT == 0 )); then
+  # IN-only rows are a from-scratch squad, legitimate only in GW1 (wildcard /
+  # free hit strategies write OUT rows too): the optimizer lost track of the
+  # team (API failure) and took its new-team path, whose rows carry no chip -
+  # POSTing them would be ~a dozen transfers of points hits
+  APPLY_MODE="lineup-only (unexpected full-squad rebuild)"
+  notify_soft "${PREFIX}AIrsenal GW${GW} WARNING: the optimizer produced a from-scratch squad (it probably failed to read the current team from the FPL API). Doing lineup only - check the log and make transfers manually if needed."
+fi
 if [[ -f "$S.applied" ]]; then
   APPLY_MODE="lineup-only (transfers already applied)"
 elif [[ -f "$S.posted" ]]; then
@@ -201,55 +206,87 @@ elif [[ -f "$S.posted" ]]; then
 fi
 log "apply mode: $APPLY_MODE"
 
+LINEUP_FAILED=0
 if (( DRY_RUN )); then
   log "dry run: skipping POSTs. Would do: $APPLY_MODE"
 elif [[ "$APPLY_MODE" == "transfers" ]]; then
-  # .posted is written BEFORE the POST and never removed: if the process dies
-  # mid-POST, the retry does lineup-only + warning instead of a double POST
+  # .posted is written BEFORE the POST: if the process dies mid-POST, the
+  # retry does lineup-only + warning instead of a double POST. It is removed
+  # again below only when the server shows that nothing was applied.
   touch "$S.posted"
   set +e
-  "$VENV_BIN/airsenal_make_transfers" --fpl_team_id "$FPL_TEAM_ID" --confirm 2>&1 | tee "$TMP/apply.out"
+  PYTHONUNBUFFERED=1 "$VENV_BIN/airsenal_make_transfers" --fpl_team_id "$FPL_TEAM_ID" --confirm 2>&1 | tee "$TMP/apply.out"
   apply_status=${PIPESTATUS[0]}
   set -e
-  if grep -q "Transfers made!" "$TMP/apply.out"; then
-    # POST confirmed client-side: set the never-re-POST marker immediately,
-    # before any fallible verification
+  if grep -qE "Transfers made!|No transfers needed" "$TMP/apply.out"; then
+    # POST confirmed client-side (or nothing to POST): set the never-re-POST
+    # marker immediately, before any fallible verification
     touch "$S.applied"
+  else
+    # no client-side confirmation: ask the server (logged-in my-team view)
+    # whether the suggested transfers are there before deciding about a retry
+    VERIFY=$("$PY" "$OPS_LIB_DIR/helpers/post_summary.py" verify \
+      --gw "$GW" --team-id "$FPL_TEAM_ID" --chip none || echo "unknown unknown")
+    case "${VERIFY%% *}" in
+      ok)
+        log "no confirmation seen but the suggested transfers are on the server - treating as applied"
+        touch "$S.applied"
+        ;;
+      mismatch)
+        # nothing was applied: let the next attempt retry the transfers, but
+        # still set a lineup on the current squad (independent and free)
+        rm -f "$S.posted"
+        log "make_transfers failed and nothing was applied (the next attempt will retry); setting the lineup anyway"
+        PYTHONUNBUFFERED=1 "$VENV_BIN/airsenal_set_lineup" --fpl_team_id "$FPL_TEAM_ID" --confirm | tee -a "$TMP/apply.out" || true
+        log "FATAL: transfers not applied"
+        exit 1
+        ;;
+      *)
+        # server state unknown: the payload is printed (unbuffered) right
+        # before the POST - if it never appeared, no POST was attempted
+        if ! grep -q "'confirmed': False" "$TMP/apply.out"; then
+          rm -f "$S.posted"
+          log "FATAL: make_transfers failed before any POST (the next attempt will retry)"
+        else
+          log "FATAL: make_transfers ended without confirmation and the server state could not be checked - no re-POST"
+        fi
+        exit 1
+        ;;
+    esac
   fi
   if (( apply_status != 0 )); then
-    if [[ -f "$S.applied" ]]; then
-      # transfers went through; only the lineup part failed - retry it alone
-      log "transfers POSTed but the lineup step failed; retrying lineup"
-      "$VENV_BIN/airsenal_set_lineup" --fpl_team_id "$FPL_TEAM_ID" --confirm | tee -a "$TMP/apply.out" \
-        || notify_soft "${PREFIX}AIrsenal GW${GW} WARNING: transfers applied but setting the lineup failed - set your starting 11 manually on the FPL site."
-    else
-      log "FATAL: make_transfers failed before the POST (no 'Transfers made!')"
-      exit 1
-    fi
-  elif (( N_TRANSFERS > 0 )) && [[ ! -f "$S.applied" ]]; then
-    log "FATAL: expected transfers but 'Transfers made!' not seen"
-    exit 1
+    # the transfer step is done; only the lineup part failed - retry it alone,
+    # and if that fails too still report, but leave .done unset so the next
+    # attempt does lineup-only (.applied blocks a second POST)
+    log "transfer step done but the lineup step failed; retrying lineup"
+    PYTHONUNBUFFERED=1 "$VENV_BIN/airsenal_set_lineup" --fpl_team_id "$FPL_TEAM_ID" --confirm | tee -a "$TMP/apply.out" || {
+      notify_soft "${PREFIX}AIrsenal GW${GW} WARNING: transfers applied but setting the lineup failed twice - will retry on the next attempt; set your starting 11 manually if it does not come through."
+      LINEUP_FAILED=1
+    }
   fi
 else
-  "$VENV_BIN/airsenal_set_lineup" --fpl_team_id "$FPL_TEAM_ID" --confirm | tee "$TMP/apply.out"
+  PYTHONUNBUFFERED=1 "$VENV_BIN/airsenal_set_lineup" --fpl_team_id "$FPL_TEAM_ID" --confirm | tee "$TMP/apply.out"
 fi
 
 # --- step 10: server-side verification (warning-only; .applied already set) ---
+# the logged-in my-team view is the only source that shows the upcoming
+# gameweek's team and chip before the deadline
 CURRENT_STEP="server-side verification"
-CHIP_STATUS=""
-if (( ! DRY_RUN )) && [[ "$APPLY_MODE" == "transfers" && "$N_TRANSFERS" -gt 0 ]]; then
-  if ! "$PY" "$OPS_LIB_DIR/helpers/post_summary.py" verify \
-      --gw "$GW" --team-id "$FPL_TEAM_ID" --expected "$N_TRANSFERS" \
-      --pre-count "$PRE_COUNT" --chip "$CHIP" > "$TMP/verify.json"; then
-    notify_soft "${PREFIX}AIrsenal GW${GW} WARNING: transfers POSTed but server-side verification failed. CHECK YOUR TEAM on the FPL site now ($(mins_left)m to deadline)."
+TRANSFERS_OK=""; CHIP_STATUS=""
+if (( ! DRY_RUN )); then
+  VERIFY=$("$PY" "$OPS_LIB_DIR/helpers/post_summary.py" verify \
+    --gw "$GW" --team-id "$FPL_TEAM_ID" --chip "$CHIP" || echo "unknown unknown")
+  read -r TRANSFERS_OK CHIP_STATUS <<<"$VERIFY"
+  log "verification: transfers=$TRANSFERS_OK chip=$CHIP_STATUS"
+  if [[ "$APPLY_MODE" == "transfers" && "$TRANSFERS_OK" != "ok" ]]; then
+    notify_soft "${PREFIX}AIrsenal GW${GW} WARNING: transfers POSTed but the team on the server does not match the suggestions (verification: ${TRANSFERS_OK}). CHECK YOUR TEAM on the FPL site now ($(mins_left)m to deadline)."
   fi
-  CHIP_STATUS=$(python3 -c "import json;print(json.load(open('$TMP/verify.json')).get('chip_status',''))" 2>/dev/null || true)
 fi
 
 # --- step 11: report ----------------------------------------------------------
 CURRENT_STEP="report"
 DL_LOCAL=$(TZ=Europe/Stockholm date -d "@$DEADLINE" '+%a %H:%M')
-TG_ARGS=(--gw "$GW" --team-id "$FPL_TEAM_ID" --mode "($APPLY_MODE)")
+TG_ARGS=(--gw "$GW" --team-id "$FPL_TEAM_ID" --mode "($APPLY_MODE)" --chip "$CHIP")
 (( DRY_RUN )) && TG_ARGS+=(--dry-run)
 [[ -n "$PRED_PTS" ]] && TG_ARGS+=(--pred "$PRED_PTS")
 [[ -n "$PRE_BANK" ]] && TG_ARGS+=(--bank-before "$PRE_BANK")
@@ -264,20 +301,31 @@ fi
 if MSG=$("$PY" "$OPS_LIB_DIR/helpers/post_summary.py" telegram "${TG_ARGS[@]}"); then
   notify_html_soft "${PREFIX}${MSG}"
 else
+  SUMMARY=$(python3 -c "import json;print(json.load(open('$TMP/check.json'))['text'])" 2>/dev/null || true)
   notify_soft "${PREFIX}AIrsenal GW${GW} done ($APPLY_MODE)
 $SUMMARY"
 fi
 
-if [[ "$CHIP" == "triple_captain" || "$CHIP" == "bench_boost" ]]; then
-  REASONING=$("$PY" "$OPS_LIB_DIR/helpers/gw_context.py" reasoning --gw "$GW" || true)
-  notify_soft "${PREFIX}ACTION REQUIRED - AIrsenal GW${GW}: activate ${CHIP^^} on fantasy.premierleague.com before ${DL_LOCAL} ($(mins_left)m left). ${REASONING} Transfers and lineup are already applied - do NOT change the lineup after activating."
-elif [[ "$CHIP" == "wildcard" || "$CHIP" == "free_hit" ]]; then
-  if [[ "$CHIP_STATUS" == "confirmed" ]]; then
-    notify_soft "${PREFIX}AIrsenal GW${GW}: ${CHIP} PLAYED via the API and verified on your team."
-    "$PY" "$OPS_LIB_DIR/helpers/gw_context.py" confirm --gw "$GW"
-  else
-    notify_soft "${PREFIX}ACTION REQUIRED - AIrsenal GW${GW}: ${CHIP} was requested via the API but NOT confirmed on your team. Activate it manually on fantasy.premierleague.com before ${DL_LOCAL} ($(mins_left)m left) or the transfers will cost a points hit."
-  fi
+if [[ "$CHIP" != "none" ]]; then
+  case "$CHIP_STATUS" in
+    confirmed)
+      notify_soft "${PREFIX}AIrsenal GW${GW}: ${CHIP} is ACTIVE on your team (verified). Nothing to do."
+      "$PY" "$OPS_LIB_DIR/helpers/gw_context.py" confirm --gw "$GW"
+      ;;
+    unknown)
+      notify_soft "${PREFIX}AIrsenal GW${GW}: ${CHIP} was decided but its status could not be verified (FPL API error). Make sure it is active on fantasy.premierleague.com before ${DL_LOCAL} ($(mins_left)m left)."
+      ;;
+    *)
+      if [[ "$CHIP" == "wildcard" || "$CHIP" == "free_hit" ]]; then
+        notify_soft "${PREFIX}ACTION REQUIRED - AIrsenal GW${GW}: ${CHIP} was requested via the API but NOT confirmed on your team. Activate it manually on fantasy.premierleague.com before ${DL_LOCAL} ($(mins_left)m left) or the transfers will cost a points hit."
+      else
+        REASONING=$("$PY" "$OPS_LIB_DIR/helpers/gw_context.py" reasoning --gw "$GW" || true)
+        LINEUP_NOTE="Transfers and lineup are already applied."
+        (( LINEUP_FAILED )) && LINEUP_NOTE="Transfers are applied; the lineup is NOT set yet (will be retried)."
+        notify_soft "${PREFIX}ACTION REQUIRED - AIrsenal GW${GW}: activate ${CHIP^^} on fantasy.premierleague.com before ${DL_LOCAL} ($(mins_left)m left).${REASONING:+ $REASONING} ${LINEUP_NOTE}"
+      fi
+      ;;
+  esac
 fi
 
 # anti-hoarding backstop: chips about to expire and research still holding
@@ -285,5 +333,5 @@ if [[ "$CHIP" == "none" && -n "$SLACK" ]] && (( CHIPS_LEFT > 0 && SLACK <= 2 ));
   notify_soft "${PREFIX}AIrsenal GW${GW} CHIP WARNING: ${CHIPS_LEFT} chip(s) unused with only ${GWS_LEFT} gameweek(s) left in this half, and research chose none again. Chips expire worthless - consider playing one manually on fantasy.premierleague.com."
 fi
 
-(( DRY_RUN )) || touch "$S.done"
+(( DRY_RUN || LINEUP_FAILED )) || touch "$S.done"
 log "=== GW${GW} run complete ==="

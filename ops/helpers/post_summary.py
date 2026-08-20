@@ -5,24 +5,32 @@ automation.
 Subcommands:
   snapshot                              print latest TransferSuggestion
                                         timestamp (or "none")
-  check --gw N --team-id T --since TS   JSON: {new_rows, n_transfers, chip,
-                                        transfers, text}
-  transfer-count --gw N --team-id T     print count of applied transfers for
-                                        the GW from the public API (-1 if the
-                                        API call fails)
-  verify --gw N --team-id T --expected K --pre-count M --chip C
-                                        exit 0 iff the applied transfers are
-                                        visible server-side; JSON on stdout
-                                        includes chip_status for C
+  check --gw N --team-id T --since TS   JSON: {new_rows, n_transfers, n_out,
+                                        chip, transfers_out, transfers_in,
+                                        bank, text}
+  telegram ...                          HTML summary for the Telegram report
+  picks-elements --team-id T            JSON list of the element ids currently
+                                        picked (logged-in my-team view)
+  verify --gw N --team-id T --chip C    print "<transfers> <chip_status>":
+                                        transfers = ok | mismatch | unknown
+                                        (do the current picks contain every
+                                        suggested IN and none of the OUTs?),
+                                        chip_status = confirmed | absent |
+                                        unknown (is chip C active?), or -
+                                        when C is none
+
+Only the result goes to stdout; everything the framework prints is sent to
+stderr so callers can parse stdout.
 """
 
 import argparse
+import contextlib
 import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from gw_context import API_CHIP_NAMES
+from gw_context import CHIPS, active_chip_name
 
 
 def latest_timestamp() -> str:
@@ -39,23 +47,40 @@ def latest_timestamp() -> str:
     return ts or "none"
 
 
-def cmd_snapshot(_args) -> None:
-    print(latest_timestamp())
-
-
-def cmd_check(args) -> None:
-    from airsenal.framework.utils import (
-        CURRENT_SEASON,
-        get_bank,
-        get_player_name,
-        session,
-    )
+def suggestion_rows(gw: int, team_id: int) -> list:
+    from airsenal.framework.utils import CURRENT_SEASON, session
     from airsenal.scripts.get_transfer_suggestions import get_transfer_suggestions
 
-    new_rows = latest_timestamp() != args.since
-    rows = get_transfer_suggestions(
-        session, gameweek=args.gw, season=CURRENT_SEASON, fpl_team_id=args.team_id
+    return get_transfer_suggestions(
+        session, gameweek=gw, season=CURRENT_SEASON, fpl_team_id=team_id
     )
+
+
+def my_team(team_id: int) -> dict | None:
+    """Logged-in my-team view (picks, chips, transfers), or None on failure."""
+    from airsenal.framework.utils import fetcher
+
+    try:
+        return fetcher.get_current_squad_data(team_id)
+    except Exception as e:
+        print(f"my-team fetch failed: {e}", file=sys.stderr)
+        return None
+
+
+def current_picks(team_id: int) -> list[dict]:
+    data = my_team(team_id)
+    return sorted(data["picks"], key=lambda p: p["position"]) if data else []
+
+
+def cmd_snapshot(_args) -> str:
+    return latest_timestamp()
+
+
+def cmd_check(args) -> str:
+    from airsenal.framework.utils import get_bank, get_player_name
+
+    new_rows = latest_timestamp() != args.since
+    rows = suggestion_rows(args.gw, args.team_id)
     players_out = [get_player_name(r.player_id) for r in rows if r.in_or_out < 0]
     players_in = [get_player_name(r.player_id) for r in rows if r.in_or_out >= 0]
     chip = rows[0].chip_played if rows else None
@@ -80,46 +105,42 @@ def cmd_check(args) -> None:
     if bank is not None:
         text += f" | bank: {bank:.1f}"
 
-    json.dump(
+    return json.dumps(
         {
             "new_rows": new_rows,
             "n_transfers": n_transfers,
+            "n_out": len(players_out),
             "chip": chip,
             "transfers_out": players_out,
             "transfers_in": players_in,
+            "bank": None if bank is None else f"{bank:.1f}",
             "text": text,
-        },
-        sys.stdout,
+        }
     )
 
 
-def cmd_telegram(args) -> None:
+def cmd_telegram(args) -> str:
     """Build the HTML-formatted Telegram summary for a completed run."""
     import html as html_mod
 
     from airsenal.framework.utils import (
         CURRENT_SEASON,
         get_bank,
+        get_player,
         get_player_from_api_id,
         get_player_name,
-        session,
     )
-    from airsenal.scripts.get_transfer_suggestions import get_transfer_suggestions
 
     esc = html_mod.escape
     pos_emoji = {"GK": "\U0001f9e4", "DEF": "\U0001f6e1", "MID": "⚡", "FWD": "⚽"}
     lines = [f"\U0001f916 <b>AIrsenal GW{args.gw}</b> {esc(args.mode)}".rstrip()]
 
-    rows = get_transfer_suggestions(
-        session, gameweek=args.gw, season=CURRENT_SEASON, fpl_team_id=args.team_id
-    )
+    rows = suggestion_rows(args.gw, args.team_id)
     outs = [str(get_player_name(r.player_id)) for r in rows if r.in_or_out < 0]
     ins = [str(get_player_name(r.player_id)) for r in rows if r.in_or_out >= 0]
     chip = rows[0].chip_played if rows else None
 
-    picks: list[dict] = []
-    if not args.dry_run:
-        picks = fetch_picks_with_retry(args.team_id)
+    picks = [] if args.dry_run else current_picks(args.team_id)
 
     if not outs and picks and args.pre_picks:
         # full-rebuild weeks (GW1, wildcard) have no OUT suggestion rows: the
@@ -168,8 +189,6 @@ def cmd_telegram(args) -> None:
         squad_section(grouped, [label(p)[0] for p in picks[11:]])
     elif ins:
         # dry run / picks unavailable: show the suggested squad instead
-        from airsenal.framework.utils import get_player
-
         grouped = {}
         for r in rows:
             if r.in_or_out >= 0 and (player := get_player(r.player_id)):
@@ -192,85 +211,50 @@ def cmd_telegram(args) -> None:
     if args.bank_before and args.bank_before != bank:
         bank = f"{args.bank_before} ➜ {bank}"
     lines.append("")
-    chip_line = f"\U0001f0cf chip: {chip or 'none'}"
+    # the orchestrator's decision wins: a chip strategy with zero transfers
+    # writes no suggestion rows, so the rows alone would say "none"
+    chip_line = f"\U0001f0cf chip: {args.chip or chip or 'none'}"
     if args.chip_note:
         chip_line += f" {esc(args.chip_note)}"
     lines.append(chip_line)
     lines.append(f"\U0001f4b0 bank: {bank}")
     if args.pred:
         lines.append(f"\U0001f4c8 pred: {esc(args.pred)}")
-    print("\n".join(lines))
+    return "\n".join(lines)
 
 
-def fetch_picks_with_retry(team_id: int) -> list[dict]:
-    from airsenal.framework.data_fetcher import FPLDataFetcher
-    from airsenal.framework.utils import fetcher
-
-    # the FPL PKCE login flow fails transiently; a fresh fetcher retries it
-    # from scratch (the module-level one latches login_failed)
-    for attempt in range(3):
-        f = fetcher if attempt == 0 else FPLDataFetcher(team_id)
-        try:
-            return sorted(f.get_current_picks(team_id), key=lambda p: p["position"])
-        except Exception as e:
-            print(f"picks fetch attempt {attempt + 1} failed: {e}", file=sys.stderr)
-    return []
+def cmd_picks_elements(args) -> str:
+    return json.dumps([p["element"] for p in current_picks(args.team_id)])
 
 
-def cmd_picks_elements(args) -> None:
-    print(json.dumps([p["element"] for p in fetch_picks_with_retry(args.team_id)]))
+def transfers_applied(picks: list[dict], ins: set[int], outs: set[int]) -> bool:
+    """Do the current picks contain every suggested IN and none of the OUTs?"""
+    elements = {p["element"] for p in picks}
+    return ins <= elements and not (outs & elements)
 
 
-def applied_transfer_count(team_id: int, gw: int) -> int:
-    from airsenal.framework.utils import fetcher
+def cmd_verify(args) -> str:
+    from airsenal.framework.utils import get_player
 
-    transfers = fetcher.get_fpl_transfer_data(team_id)
-    return sum(1 for t in transfers if t.get("event") == gw)
+    data = my_team(args.team_id)
+    if data is None:
+        return "unknown unknown"
 
-
-def cmd_transfer_count(args) -> None:
-    try:
-        print(applied_transfer_count(args.team_id, args.gw))
-    except Exception as e:
-        print(f"transfer-count failed: {e}", file=sys.stderr)
-        print(-1)
-
-
-def cmd_verify(args) -> None:
-    from airsenal.framework.utils import fetcher
-
-    result: dict = {}
-    if args.gw == 1:
-        # pre-season squad changes are not listed by the transfers endpoint
-        result["transfers_ok"] = True
-        result["note"] = "GW1: transfer endpoint not applicable pre-season"
-    elif args.pre_count < 0:
-        result["transfers_ok"] = False
-        result["note"] = "pre-count unavailable, cannot verify"
+    api_ids: dict[int, set[int]] = {1: set(), -1: set()}
+    for r in suggestion_rows(args.gw, args.team_id):
+        if player := get_player(r.player_id):
+            api_ids[1 if r.in_or_out >= 0 else -1].add(player.fpl_api_id)
+    if not api_ids[1]:
+        transfers = "unknown"  # nothing suggested, nothing to compare against
+    elif transfers_applied(data["picks"], api_ids[1], api_ids[-1]):
+        transfers = "ok"
     else:
-        try:
-            post = applied_transfer_count(args.team_id, args.gw)
-        except Exception as e:
-            post = -1
-            result["note"] = f"post-count failed: {e}"
-        result["post_count"] = post
-        result["transfers_ok"] = post >= args.pre_count + args.expected
+        transfers = "mismatch"
 
-    chip_status = ""
-    if args.chip in ("wildcard", "free_hit"):
-        try:
-            hist = fetcher.get_fpl_team_history_data(args.team_id)
-            played = {
-                (API_CHIP_NAMES.get(c["name"], c["name"]), c["event"])
-                for c in hist.get("chips", [])
-            }
-            chip_status = "confirmed" if (args.chip, args.gw) in played else "absent"
-        except Exception:
-            chip_status = "unknown"
-    result["chip_status"] = chip_status
-
-    json.dump(result, sys.stdout)
-    sys.exit(0 if result["transfers_ok"] else 1)
+    chip_status = "-"
+    if args.chip in CHIPS:
+        chip_status = "confirmed" if active_chip_name(data) == args.chip else "absent"
+    return f"{transfers} {chip_status}"
 
 
 def main() -> None:
@@ -294,6 +278,7 @@ def main() -> None:
     p.add_argument("--bank-before", default="")
     p.add_argument("--pre-picks", default="", help="JSON file of pre-apply element ids")
     p.add_argument("--chip-note", default="", help="appended to the chip line")
+    p.add_argument("--chip", default="", help="the run's chip decision")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_telegram)
 
@@ -301,21 +286,19 @@ def main() -> None:
     p.add_argument("--team-id", type=int, required=True)
     p.set_defaults(func=cmd_picks_elements)
 
-    p = sub.add_parser("transfer-count")
-    p.add_argument("--gw", type=int, required=True)
-    p.add_argument("--team-id", type=int, required=True)
-    p.set_defaults(func=cmd_transfer_count)
-
     p = sub.add_parser("verify")
     p.add_argument("--gw", type=int, required=True)
     p.add_argument("--team-id", type=int, required=True)
-    p.add_argument("--expected", type=int, required=True)
-    p.add_argument("--pre-count", type=int, required=True)
     p.add_argument("--chip", default="none")
     p.set_defaults(func=cmd_verify)
 
     args = parser.parse_args()
-    args.func(args)
+    # the framework prints diagnostics (DB fallbacks, lookups) to stdout;
+    # keep them off the result channel
+    with contextlib.redirect_stdout(sys.stderr):
+        output = args.func(args)
+    if output is not None:
+        print(output)
 
 
 if __name__ == "__main__":

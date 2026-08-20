@@ -69,7 +69,9 @@ if [[ -f "$S.deadline" ]]; then
       # jumped > 30 days: a new season is reusing this gameweek number -
       # clear last season's markers or this gameweek never runs again
       rm -f "$S.done" "$S.attempts" "$S.started" "$S.applied" "$S.posted" \
-        "$S.postmortem" "$S.reminded" "$S.moved" "$S.lockblocked"
+        "$S.postmortem" "$S.reminded" "$S.moved"
+      # and at GW1 every recorded chip decision is last season's
+      (( gw == 1 )) && echo '{"entries": []}' > "$CHIPS_STATE"
     else
       attempts=$(cat "$S.attempts" 2>/dev/null || echo 0)
       if (( attempts > 0 && deadline_epoch > prev_deadline + 1800 )) && [[ ! -f "$S.moved" ]]; then
@@ -86,25 +88,16 @@ fi
 
 # --- chip reminder at T-REMIND_HOURS_BEFORE ---------------------------------
 if (( secs_left <= REMIND_HOURS_BEFORE * 3600 )) && [[ ! -f "$S.reminded" && -f "$CHIPS_STATE" ]]; then
-  chip=$(python3 "$OPS_LIB_DIR/helpers/gw_context.py" chip-for-gw --gw "$gw" || echo "none")
+  chip=$("$PY" "$OPS_LIB_DIR/helpers/gw_context.py" chip-for-gw --gw "$gw" || echo "none")
   if [[ -n "$chip" && "$chip" != "none" ]]; then
     mins_left=$((secs_left / 60))
-    # ground truth from the public history endpoint
-    api_chip=$(curl -sSf --max-time 20 "https://fantasy.premierleague.com/api/entry/${FPL_TEAM_ID}/history/" | python3 -c '
-import json, sys
-gw = int(sys.argv[1])
-names = {"wildcard": "wildcard", "freehit": "free_hit", "bboost": "bench_boost", "3xc": "triple_captain"}
-try:
-    data = json.loads(sys.stdin.read())
-except Exception:
-    sys.exit(0)
-for c in data.get("chips", []):
-    if c.get("event") == gw:
-        print(names.get(c["name"], c["name"]))
-        break
-' "$gw" || true)
+    # ground truth: the logged-in my-team view (the public endpoints only show
+    # a gameweek's chip after its deadline)
+    api_chip=$("$PY" "$OPS_LIB_DIR/helpers/gw_context.py" active-chip || echo "unknown")
     if [[ "$api_chip" == "$chip" ]]; then
       notify_soft "AIrsenal GW${gw} chip check: ${chip} is ACTIVE on your team. Nothing to do. (${mins_left}m to deadline)"
+    elif [[ "$api_chip" == "unknown" ]]; then
+      notify_soft "AIrsenal GW${gw} REMINDER: ${chip} was decided but its status could not be checked (FPL API error). Make sure it is active on fantasy.premierleague.com - ${mins_left}m left before the deadline."
     else
       notify_soft "AIrsenal GW${gw} REMINDER: ${chip} was decided but is NOT active yet. Activate it on fantasy.premierleague.com NOW - ${mins_left}m left before the deadline."
     fi
@@ -117,12 +110,13 @@ if (( secs_left <= RUN_HOURS_BEFORE * 3600 )); then
   [[ -f "$S.done" ]] && exit 0
   attempts=$(cat "$S.attempts" 2>/dev/null || echo 0)
   (( attempts >= MAX_ATTEMPTS )) && exit 0
-  if [[ -f "$S.started" ]]; then
-    pid=$(head -1 "$S.started" | cut -d' ' -f1)
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-      exit 0  # a run is in progress
-    fi
-  fi
+  # a run is in progress while run_gameweek.sh (or a child it left behind)
+  # holds the lock; unlike a recorded pid this survives reboots and pid reuse.
+  # Only a real lock conflict (exit 99) means busy - any other failure of the
+  # probe must not silently disable the scheduler
+  flock -n -E 99 "$RUN_DIR/airsenal.lock" true && rc=0 || rc=$?
+  (( rc == 99 )) && exit 0
+  (( rc != 0 )) && log "lock probe failed (exit $rc) - launching anyway"
   echo $((attempts + 1)) > "$S.attempts"
   log "firing run_gameweek for GW${gw} (attempt $((attempts + 1)), ${secs_left}s to deadline)"
   setsid nohup "$OPS_LIB_DIR/run_gameweek.sh" "$gw" "$deadline_epoch" \

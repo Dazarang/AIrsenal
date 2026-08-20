@@ -85,6 +85,25 @@ def get_lineup_from_payload(lineup: dict) -> Squad:
     raise RuntimeError(msg)
 
 
+def active_team_chip(my_team: dict) -> str | None:
+    """
+    API name ("bboost"/"3xc") of the team chip already active for the
+    gameweek, or None. It must be sent back with the lineup: posting
+    chip=None is what the FPL client sends to cancel it. Transfer chips
+    (wildcard/freehit) are deliberately excluded - the FPL client's lineup
+    request only ever carries the team chip; those live on the transfers
+    endpoint (see make_transfers.build_transfer_payload).
+    """
+    return next(
+        (
+            c["name"]
+            for c in my_team.get("chips", [])
+            if c.get("chip_type") == "team" and c.get("status_for_entry") == "active"
+        ),
+        None,
+    )
+
+
 def make_squad_transfers(squad: Squad, priced_transfers: list[dict]) -> None:
     for t in priced_transfers:
         squad.remove_player(t[0][0], price=t[0][1])
@@ -117,7 +136,7 @@ def set_lineup(
         return
 
     payload = build_lineup_payload(squad)
-    fetcher.post_lineup(payload)
+    fetcher.post_lineup(payload, chip=active_team_chip(picks))
 
 
 def main():

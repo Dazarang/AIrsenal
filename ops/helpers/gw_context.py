@@ -8,11 +8,20 @@ subcommands stay fast):
   validate --context ctx.json           read decision JSON on stdin, print
                                         validated chip name or "none"
   record --gw N --season S --chip C --confidence X --reasoning R
+  clear --gw N                          drop any unconfirmed decision for the GW
   confirm --gw N                        mark a recorded decision as confirmed
   reasoning --gw N                      print stored reasoning for the GW
+  chip-for-gw --gw N                    print the recorded chip for the GW or none
+  slack --gw N                          print "chips_left gws_left slack"
+  active-chip                           chip active on the (logged-in) my-team
+                                        view for the upcoming gameweek, or none
+
+Only the result goes to stdout; everything the framework prints is sent to
+stderr so callers can parse stdout.
 """
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -60,37 +69,122 @@ def save_state(state: dict) -> None:
 
 
 def entry_for_gw(state: dict, gw: int) -> dict | None:
-    # newest entry wins (guards against same-gw entries from a past season)
-    return next((e for e in reversed(state["entries"]) if e.get("gw") == gw), None)
+    """Newest non-lapsed entry for the gameweek (the state holds one season)."""
+    return next(
+        (
+            e
+            for e in reversed(state["entries"])
+            if e.get("gw") == gw and not e.get("lapsed")
+        ),
+        None,
+    )
 
 
 def half_range(gw: int) -> tuple[int, int]:
     return (1, 19) if gw <= 19 else (20, 38)
 
 
-def cmd_assert_gw(args) -> None:
-    from airsenal.framework.utils import NEXT_GAMEWEEK
+def active_chip_name(my_team: dict) -> str | None:
+    """Chip active for the upcoming gameweek in the my-team view, if any."""
+    return next(
+        (
+            API_CHIP_NAMES.get(c["name"], c["name"])
+            for c in my_team.get("chips", [])
+            if c.get("status_for_entry") == "active"
+        ),
+        None,
+    )
 
-    if args.gw != NEXT_GAMEWEEK:
-        print(
-            f"GAMEWEEK MISMATCH: scheduler says GW{args.gw} but AIrsenal "
-            f"NEXT_GAMEWEEK is {NEXT_GAMEWEEK}. Chip flags would be silently "
-            "dropped - aborting.",
-            file=sys.stderr,
-        )
-        sys.exit(3)
 
-
-def compute_available_chips(
-    gw: int, season: str, played: list[dict], entries: list[dict]
-) -> tuple[list[str], list[str]]:
+def reconcile_state(
+    state: dict,
+    gw: int,
+    season: str,
+    played: list[dict],
+    active: str | None,
+    available_now: set[str] | None = None,
+) -> list[str]:
     """
-    Pure chip-availability logic (2026/27 rules: ALL four chips reset at the
-    half boundary - one full set per half, first set dies at the GW19
-    deadline). Returns (available, notes).
+    Bring past decisions in line with reality (mutates state, returns notes):
+    previous seasons are dropped; decisions are confirmed when the chip shows
+    up in the played history, or is active right now for this gameweek; past
+    decisions absent from the history are lapsed (never activated, or
+    activated and cancelled again before the deadline). A past decision that
+    was already confirmed is only lapsed when the server's own chip statuses
+    (available_now, from my-team) also show the chip as still available -
+    never on the history endpoint alone.
+    """
+    notes: list[str] = []
+    state["entries"] = [e for e in state["entries"] if e.get("season") == season]
+    for e in state["entries"]:
+        if e.get("lapsed"):
+            continue
+        if any(p["chip"] == e["chip"] and p["gw"] == e["gw"] for p in played):
+            e["confirmed"] = True
+        elif e["gw"] == gw:
+            if e["chip"] == active:
+                e["confirmed"] = True
+        elif e["gw"] < gw and (
+            not e.get("confirmed")
+            or (available_now is not None and e["chip"] in available_now)
+        ):
+            e["lapsed"] = True
+            e["confirmed"] = False
+            notes.append(
+                f"{e['chip']} was decided for GW{e['gw']} but never played - "
+                "it is back in the available pool."
+            )
+    return notes
+
+
+def clear_decision(state: dict, gw: int) -> None:
+    """Drop any unconfirmed decision for the gameweek (mutates state)."""
+    state["entries"] = [
+        e for e in state["entries"] if e.get("gw") != gw or e.get("confirmed")
+    ]
+
+
+def record_decision(
+    state: dict, gw: int, season: str, chip: str, confidence: float, reasoning: str
+) -> None:
+    """
+    Replace any unconfirmed decision for the gameweek with this one (mutates
+    state). A confirmed entry for the same chip is left alone; raises
+    ValueError if a confirmed entry for a different chip exists.
+    """
+    confirmed = [
+        e
+        for e in state["entries"]
+        if e.get("gw") == gw and e.get("season") == season and e.get("confirmed")
+    ]
+    if confirmed:
+        if any(e["chip"] == chip for e in confirmed):
+            return
+        msg = f"refusing to overwrite a confirmed chip entry for GW{gw} {season}"
+        raise ValueError(msg)
+    clear_decision(state, gw)
+    state["entries"].append(
+        {
+            "gw": gw,
+            "season": season,
+            "chip": chip,
+            "confidence": confidence,
+            "reasoning": reasoning,
+            "decided_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "confirmed": False,
+        }
+    )
+
+
+def chip_stock(
+    gw: int, season: str, played: list[dict], entries: list[dict]
+) -> list[str]:
+    """
+    Chips still unused (and not reserved by a pending decision) in the half
+    that contains gw. 2026/27 rules: ALL four chips reset at the half boundary
+    - one full set per half, the first set dies at the GW19 deadline.
     """
     lo, hi = half_range(gw)
-    notes: list[str] = []
     used_this_half = {p["chip"] for p in played if lo <= p["gw"] <= hi}
     pending = {
         e["chip"]
@@ -100,11 +194,24 @@ def compute_available_chips(
         and not e.get("lapsed")
         and (e["gw"] != gw or e.get("confirmed"))
     }
-    available = [c for c in CHIPS if c not in used_this_half and c not in pending]
+    return [c for c in CHIPS if c not in used_this_half and c not in pending]
+
+
+def compute_available_chips(
+    gw: int, season: str, played: list[dict], entries: list[dict]
+) -> tuple[list[str], list[str]]:
+    """
+    Chips the pipeline may play THIS gameweek: the stock minus the per-week
+    rules. Returns (available, notes).
+    """
+    notes: list[str] = []
+    available = chip_stock(gw, season, played, entries)
     if gw == 1:
-        # free_hit is banned in GW1 by the rules; wildcard is pointless
-        # (pre-season transfers are unlimited) and the GW1 code path ignores it
-        available = [c for c in available if c not in ("wildcard", "free_hit")]
+        # free_hit is banned in GW1 and the wildcard is pointless (pre-season
+        # transfers are unlimited); the GW1 optimizer path builds the squad
+        # from scratch and ignores every chip flag, so triple_captain /
+        # bench_boost could not be optimized for either
+        available = []
     if (
         gw == 20
         and "free_hit" in available
@@ -121,22 +228,20 @@ def compute_available_chips(
     return available, notes
 
 
-def chips_played_from_api(fetcher, team_id: int) -> list[dict]:
-    hist = fetcher.get_fpl_team_history_data(team_id)
+def chips_played(history: dict) -> list[dict]:
     return [
         {"chip": API_CHIP_NAMES.get(c["name"], c["name"]), "gw": c["event"]}
-        for c in hist.get("chips", [])
+        for c in history.get("chips", [])
     ]
 
 
-def team_performance(fetcher, team_id: int) -> dict:
+def team_performance(history: dict, fetcher) -> dict:
     """Recent gameweek returns vs the global average - the wildcard signal."""
-    hist = fetcher.get_fpl_team_history_data(team_id)
     averages = {
         e["id"]: e.get("average_entry_score")
         for e in fetcher.get_current_summary_data().get("events", [])
     }
-    recent = hist.get("current", [])[-5:]
+    recent = history.get("current", [])[-5:]
     if not recent:
         return {"note": "season not started - no performance history yet"}
     perf = {
@@ -161,10 +266,23 @@ def team_performance(fetcher, team_id: int) -> dict:
     return perf
 
 
-def cmd_context(args) -> None:
+def cmd_assert_gw(args) -> None:
+    from airsenal.framework.utils import NEXT_GAMEWEEK
+
+    if args.gw != NEXT_GAMEWEEK:
+        print(
+            f"GAMEWEEK MISMATCH: scheduler says GW{args.gw} but AIrsenal "
+            f"NEXT_GAMEWEEK is {NEXT_GAMEWEEK}. Chip flags would be silently "
+            "dropped - aborting.",
+            file=sys.stderr,
+        )
+        sys.exit(3)
+
+
+def cmd_context(args) -> str:
     from sqlalchemy import select
 
-    from airsenal.framework.schema import Fixture
+    from airsenal.framework.schema import Fixture, Team
     from airsenal.framework.utils import (
         CURRENT_SEASON,
         NEXT_GAMEWEEK,
@@ -182,44 +300,46 @@ def cmd_context(args) -> None:
     team_id = int(os.environ["FPL_TEAM_ID"])
     notes: list[str] = []
 
-    played = chips_played_from_api(fetcher, team_id)
+    history = fetcher.get_fpl_team_history_data(team_id)
+    played = chips_played(history)
     _, hi = half_range(gw)
 
-    # reconcile past decisions with reality (current season only)
+    # the logged-in my-team view is the only pre-deadline source for the chip
+    # that is active right now and for the server's own availability flags
+    try:
+        my_team_chips = fetcher.get_current_squad_data(team_id)["chips"]
+    except Exception as e:
+        my_team_chips = None
+        notes.append(f"could not cross-check chips with the API ({type(e).__name__})")
+    active = active_chip_name({"chips": my_team_chips or []})
+    api_available = None
+    if my_team_chips is not None:
+        api_available = {
+            API_CHIP_NAMES.get(c["name"], c["name"])
+            for c in my_team_chips
+            if c.get("status_for_entry") == "available"
+        }
+
     state = load_state()
-    for e in state["entries"]:
-        if e.get("season") != CURRENT_SEASON or e.get("lapsed") or e.get("confirmed"):
-            continue
-        if any(p["chip"] == e["chip"] and p["gw"] == e["gw"] for p in played):
-            e["confirmed"] = True
-        elif e["gw"] < gw:
-            e["lapsed"] = True
-            notes.append(
-                f"{e['chip']} was decided for GW{e['gw']} but never activated - "
-                "it is back in the available pool."
-            )
+    notes.extend(
+        reconcile_state(state, gw, CURRENT_SEASON, played, active, api_available)
+    )
     save_state(state)
 
     available, avail_notes = compute_available_chips(
         gw, CURRENT_SEASON, played, state["entries"]
     )
     notes.extend(avail_notes)
-    if available:
-        # server-side cross-check via my-team chip statuses (requires login)
-        try:
-            api_available = {
-                API_CHIP_NAMES.get(c, c) for c in fetcher.get_available_chips(team_id)
-            }
-            dropped = sorted(set(available) - api_available)
-            if dropped:
-                notes.append(
-                    f"excluded by server-side chip status: {', '.join(dropped)}"
-                )
-            available = [c for c in available if c in api_available]
-        except Exception as e:
-            notes.append(
-                f"could not cross-check chips with the API ({type(e).__name__})"
-            )
+    if available and active:
+        available = []
+        notes.append(
+            f"{active} is already active for this gameweek - no further chip "
+            "may be played."
+        )
+    elif available and api_available is not None:
+        if dropped := sorted(set(available) - api_available):
+            notes.append(f"excluded by server-side chip status: {', '.join(dropped)}")
+        available = [c for c in available if c in api_available]
 
     # current squad with availability flags
     squad_info: list[dict] = []
@@ -267,10 +387,10 @@ def cmd_context(args) -> None:
         notes.append(f"could not fetch current squad ({type(e).__name__}: {e})")
 
     try:
-        performance = team_performance(fetcher, team_id)
+        performance = team_performance(history, fetcher)
     except Exception as e:
         performance = {}
-        notes.append(f"could not fetch performance history ({type(e).__name__})")
+        notes.append(f"could not build performance history ({type(e).__name__})")
 
     try:
         free_transfers = get_free_transfers(fpl_team_id=team_id, gameweek=gw)
@@ -302,22 +422,16 @@ def cmd_context(args) -> None:
         counts[f.gameweek][f.away_team] += 1
     # base team set from the Team table, not the fixture window - otherwise a
     # team blanking in every window gameweek is invisible near season end
-    try:
-        from airsenal.framework.schema import Team
-
-        all_teams = set(
-            session.scalars(
-                select(Team.name).where(Team.season == CURRENT_SEASON)
-            ).all()
-        )
-    except Exception:
-        all_teams = {t for c in counts.values() for t in c}
-    fixture_info = {}
-    for g, c in sorted(counts.items()):
-        fixture_info[str(g)] = {
+    all_teams = set(
+        session.scalars(select(Team.name).where(Team.season == CURRENT_SEASON)).all()
+    ) or {t for c in counts.values() for t in c}
+    fixture_info = {
+        str(g): {
             "doubles": sorted(t for t, n in c.items() if n >= 2),
             "blanks": sorted(all_teams - set(c)),
         }
+        for g, c in sorted(counts.items())
+    }
 
     deadline = datetime.fromtimestamp(args.deadline_epoch, tz=timezone.utc)
     ctx = {
@@ -328,6 +442,7 @@ def cmd_context(args) -> None:
         "half": 1 if gw <= 19 else 2,
         "gameweeks_left_in_half": hi - gw + 1,
         "chips_available": available,
+        "active_chip": active,
         "chips_played_this_season": played,
         "squad": squad_info,
         "performance": performance,
@@ -337,17 +452,16 @@ def cmd_context(args) -> None:
         "fixtures_by_gameweek": fixture_info,
         "notes": notes,
     }
-    json.dump(ctx, sys.stdout, indent=2)
+    return json.dumps(ctx, indent=2)
 
 
-def cmd_validate(args) -> None:
+def cmd_validate(args) -> str:
     with open(args.context) as f:
         ctx = json.load(f)
     try:
         decision = json.load(sys.stdin)
     except json.JSONDecodeError:
-        print("none")
-        return
+        return "none"
     available = ctx.get("chips_available", [])
     slack = None
     if ctx.get("gameweeks_left_in_half") is not None and available:
@@ -360,41 +474,25 @@ def cmd_validate(args) -> None:
         and isinstance(confidence, (int, float))
         and confidence >= confidence_threshold(slack)
     ):
-        print(chip)
-    else:
-        print("none")
+        return chip
+    return "none"
 
 
 def cmd_record(args) -> None:
     state = load_state()
-    same_gw = [
-        e
-        for e in state["entries"]
-        if e.get("gw") == args.gw and e.get("season") == args.season
-    ]
-    if any(e.get("confirmed") for e in same_gw):
-        print(
-            "refusing to overwrite a confirmed chip entry for "
-            f"GW{args.gw} {args.season}",
-            file=sys.stderr,
+    try:
+        record_decision(
+            state, args.gw, args.season, args.chip, args.confidence, args.reasoning
         )
+    except ValueError as e:
+        print(e, file=sys.stderr)
         sys.exit(1)
-    state["entries"] = [
-        e
-        for e in state["entries"]
-        if not (e.get("gw") == args.gw and e.get("season") == args.season)
-    ]
-    state["entries"].append(
-        {
-            "gw": args.gw,
-            "season": args.season,
-            "chip": args.chip,
-            "confidence": args.confidence,
-            "reasoning": args.reasoning,
-            "decided_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "confirmed": False,
-        }
-    )
+    save_state(state)
+
+
+def cmd_clear(args) -> None:
+    state = load_state()
+    clear_decision(state, args.gw)
     save_state(state)
 
 
@@ -405,31 +503,33 @@ def cmd_confirm(args) -> None:
         save_state(state)
 
 
-def cmd_reasoning(args) -> None:
-    if e := entry_for_gw(load_state(), args.gw):
-        print(e.get("reasoning", ""))
+def cmd_reasoning(args) -> str:
+    e = entry_for_gw(load_state(), args.gw)
+    return e.get("reasoning", "") if e else ""
 
 
-def cmd_slack(args) -> None:
-    """Print 'chips_left gws_left slack' for the current half (public API only)."""
+def cmd_chip_for_gw(args) -> str:
+    e = entry_for_gw(load_state(), args.gw)
+    return e["chip"] if e else "none"
+
+
+def cmd_slack(args) -> str:
+    """'chips_left gws_left slack' for the current half (public API only)."""
     from airsenal.framework.utils import CURRENT_SEASON, fetcher
 
     team_id = int(os.environ["FPL_TEAM_ID"])
-    played = chips_played_from_api(fetcher, team_id)
-    available, _ = compute_available_chips(
-        args.gw, CURRENT_SEASON, played, load_state()["entries"]
-    )
+    played = chips_played(fetcher.get_fpl_team_history_data(team_id))
+    stock = chip_stock(args.gw, CURRENT_SEASON, played, load_state()["entries"])
     _, hi = half_range(args.gw)
     gws_left = hi - args.gw + 1
-    print(len(available), gws_left, gws_left - len(available))
+    return f"{len(stock)} {gws_left} {gws_left - len(stock)}"
 
 
-def cmd_chip_for_gw(args) -> None:
-    e = entry_for_gw(load_state(), args.gw)
-    if e and e.get("chip") and not e.get("lapsed"):
-        print(e["chip"])
-    else:
-        print("none")
+def cmd_active_chip(_args) -> str:
+    from airsenal.framework.utils import fetcher
+
+    team_id = int(os.environ["FPL_TEAM_ID"])
+    return active_chip_name(fetcher.get_current_squad_data(team_id)) or "none"
 
 
 def main() -> None:
@@ -453,9 +553,13 @@ def main() -> None:
     p.add_argument("--gw", type=int, required=True)
     p.add_argument("--season", required=True)
     p.add_argument("--chip", required=True, choices=CHIPS)
-    p.add_argument("--confidence", type=float, required=True)
+    p.add_argument("--confidence", type=float, default=0.0)
     p.add_argument("--reasoning", default="")
     p.set_defaults(func=cmd_record)
+
+    p = sub.add_parser("clear")
+    p.add_argument("--gw", type=int, required=True)
+    p.set_defaults(func=cmd_clear)
 
     p = sub.add_parser("confirm")
     p.add_argument("--gw", type=int, required=True)
@@ -473,8 +577,16 @@ def main() -> None:
     p.add_argument("--gw", type=int, required=True)
     p.set_defaults(func=cmd_slack)
 
+    p = sub.add_parser("active-chip")
+    p.set_defaults(func=cmd_active_chip)
+
     args = parser.parse_args()
-    args.func(args)
+    # the framework prints diagnostics (DB fallbacks, lookups) to stdout;
+    # keep them off the result channel
+    with contextlib.redirect_stdout(sys.stderr):
+        output = args.func(args)
+    if output is not None:
+        print(output)
 
 
 if __name__ == "__main__":

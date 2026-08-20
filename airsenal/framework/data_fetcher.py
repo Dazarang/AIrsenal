@@ -43,6 +43,13 @@ LOGIN_URLS = {
 
 CLIENT_ID = "bfcbaf69-aade-4c1b-8f00-c1cb8a193030"
 STANDARD_CONNECTION_ID = "867ed4363b2bc21c860085ad2baa817d"
+# the PKCE login flow fails transiently; retry from scratch before giving up
+LOGIN_ATTEMPTS = 3
+LOGIN_RETRY_DELAY = 10  # seconds
+
+
+class FPLLoginError(Exception):
+    """One pass through the FPL login flow failed."""
 
 
 def generate_code_verifier():
@@ -62,6 +69,7 @@ class FPLDataFetcher:
 
     def __init__(self, fpl_team_id: int | None = None, rsession=None):
         self.rsession = rsession or requests.Session(impersonate="chrome")
+        self._owns_session = rsession is None
         self.headers: dict[str, str] = {}
         self.logged_in = False
         self.login_failed = False
@@ -125,6 +133,8 @@ class FPLDataFetcher:
     def login(self):
         """
         only needed for accessing mini-league data, or team info for current gw.
+        Retries the (transiently flaky) login flow, including network errors,
+        before latching login_failed.
         """
         if self.logged_in:
             return
@@ -152,6 +162,33 @@ class FPLDataFetcher:
                 self._set_login_failed(msg="Credentials not provided.")
                 return
 
+        for attempt in range(1, LOGIN_ATTEMPTS + 1):
+            try:
+                self._try_login()
+            except (FPLLoginError, requests.exceptions.RequestException) as e:
+                if attempt == LOGIN_ATTEMPTS:
+                    cause = e.__cause__ if isinstance(e, FPLLoginError) else e
+                    self._set_login_failed(exception=cause, msg=str(e))
+                    return
+                warnings.warn(
+                    f"FPL login attempt {attempt} failed ({e}); retrying in "
+                    f"{LOGIN_RETRY_DELAY}s.",
+                    stacklevel=2,
+                )
+                time.sleep(LOGIN_RETRY_DELAY)
+                if self._owns_session:
+                    # a fresh session, as a fresh process would have: no
+                    # cookies left over from the failed flow
+                    self.rsession = requests.Session(impersonate="chrome")
+            else:
+                self.logged_in = True
+                return
+
+    def _try_login(self):
+        """
+        One pass through the PKCE login flow. Sets the auth header on success,
+        raises FPLLoginError (or a RequestException) on failure.
+        """
         code_verifier = generate_code_verifier()  # code_verifier for PKCE
         code_challenge = generate_code_challenge(
             code_verifier
@@ -174,16 +211,16 @@ class FPLDataFetcher:
         if match := re.search(r'"accessToken":"([^"]+)"', login_html):
             access_token = match.group(1)
         else:
-            self._set_login_failed(msg="Failed to extract access token.")
-            return
+            msg = "Failed to extract access token."
+            raise FPLLoginError(msg)
         # need to read state here for when we resume the OAuth flow later on
         if match := re.search(
             r'<input[^>]+name="state"[^>]+value="([^"]+)"', login_html
         ):
             new_state = match.group(1)
         else:
-            self._set_login_failed(msg="Failed to extract state.")
-            return
+            msg = "Failed to extract state."
+            raise FPLLoginError(msg)
 
         # Step 2: Use accessToken to get interaction id
         headers = {
@@ -195,9 +232,9 @@ class FPLDataFetcher:
             r_json = response.json()
             interaction_id = r_json["interactionId"]
             response_id = r_json["id"]
-        except (json.JSONDecodeError, KeyError) as e:
-            self._set_login_failed(exception=e, msg="Failed to extract interaction ID.")
-            return
+        except (ValueError, KeyError, TypeError) as e:
+            msg = "Failed to extract interaction ID."
+            raise FPLLoginError(msg) from e
 
         # Step 3: log in with interaction ID (requires 3 post requests)
         response = self.rsession.post(
@@ -219,11 +256,9 @@ class FPLDataFetcher:
         )
         try:
             response_id = response.json()["id"]
-        except (json.JSONDecodeError, KeyError) as e:
-            self._set_login_failed(
-                exception=e, msg="Interaction Post 1 Failed (id generation)"
-            )
-            return
+        except (ValueError, KeyError, TypeError) as e:
+            msg = "Interaction Post 1 Failed (id generation)"
+            raise FPLLoginError(msg) from e
 
         response = self.rsession.post(
             LOGIN_URLS["login"].format(STANDARD_CONNECTION_ID),
@@ -252,12 +287,9 @@ class FPLDataFetcher:
             r_json = response.json()
             response_id = r_json["id"]
             connection_id = r_json["connectionId"]
-        except (json.JSONDecodeError, KeyError) as e:
-            self._set_login_failed(
-                exception=e,
-                msg="Interaction Post 2 Failed (connectionID generation)",
-            )
-            return
+        except (ValueError, KeyError, TypeError) as e:
+            msg = "Interaction Post 2 Failed (connectionID generation)"
+            raise FPLLoginError(msg) from e
 
         response = self.rsession.post(
             LOGIN_URLS["login"].format(connection_id),
@@ -280,12 +312,9 @@ class FPLDataFetcher:
         )
         try:
             dvResponse = response.json()["dvResponse"]
-        except (json.JSONDecodeError, KeyError) as e:
-            self._set_login_failed(
-                exception=e,
-                msg="Interaction Post 3 Failed (dvResponse generation)",
-            )
-            return
+        except (ValueError, KeyError, TypeError) as e:
+            msg = "Interaction Post 3 Failed (dvResponse generation)"
+            raise FPLLoginError(msg) from e
 
         # Step 4: Resume the login using the dv_response and handle redirect
         response = self.rsession.post(
@@ -298,8 +327,8 @@ class FPLDataFetcher:
         ):
             auth_code = match.group(1)
         else:
-            self._set_login_failed(msg="Failed to extract auth code.")
-            return
+            msg = "Failed to extract auth code."
+            raise FPLLoginError(msg)
 
         # Step 5: Exchange auth code for access token
         response = self.rsession.post(
@@ -314,21 +343,17 @@ class FPLDataFetcher:
         )
         try:
             access_token = response.json()["access_token"]
-        except (json.JSONDecodeError, KeyError) as e:
-            self._set_login_failed(exception=e, msg="Failed to retrieve access token.")
-            return
+        except (ValueError, KeyError, TypeError) as e:
+            msg = "Failed to retrieve access token."
+            raise FPLLoginError(msg) from e
 
         self.headers = {"X-API-Authorization": f"Bearer {access_token}"}
         response = self._get_request(LOGIN_URLS["me"])
-        if "player" in response:
-            self.logged_in = True
-        else:
-            self._set_login_failed(
-                msg="All login steps succeeded but team data retrieval failed."
-            )
-            return
+        if "player" not in response:
+            msg = "All login steps succeeded but team data retrieval failed."
+            raise FPLLoginError(msg)
 
-    def _set_login_failed(self, exception: Exception | None = None, msg: str = ""):
+    def _set_login_failed(self, exception: BaseException | None = None, msg: str = ""):
         self.login_failed = True
         exc_str = (
             "".join(traceback.TracebackException.from_exception(exception).format())
@@ -588,10 +613,14 @@ class FPLDataFetcher:
         team_url = self.FPL_MYTEAM_URL.format(self.FPL_TEAM_ID)
         return self._get_request(team_url)
 
-    def post_lineup(self, payload):
-        """Set the lineup for a specific team"""
+    def post_lineup(self, payload, chip=None):
+        """
+        Set the lineup for a specific team. `chip` is the API name of the team
+        chip ("bboost"/"3xc") that is active for the gameweek, if any: the same
+        request with chip=None is what the FPL client sends to cancel it.
+        """
         self.login()
-        payload = {"chip": None, "picks": payload}
+        payload = {"chip": chip, "picks": payload}
         team_url = self.FPL_MYTEAM_URL.format(self.FPL_TEAM_ID)
         self._post_data(
             team_url,

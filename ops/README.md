@@ -4,8 +4,8 @@ Unattended FPL pipeline on the Raspberry Pi (`dazpi`): 3h before every
 gameweek deadline it pulls this repo, runs a headless-Claude chip-research
 step, runs the AIrsenal pipeline (update DB → predictions → optimization →
 transfers + lineup via the API), verifies server-side, and reports on
-Telegram (reusing the pquant bot token read-only). 1h before the deadline a
-reminder fires if a chip was decided.
+Telegram via its own send-only bot (`@fplquant_bot`, single recipient chat
+id). 1h before the deadline a reminder fires if a chip was decided.
 
 Full design/plan: `~/.claude/plans/what-we-want-to-quiet-aurora.md` (on the Mac).
 
@@ -44,7 +44,9 @@ Full design/plan: `~/.claude/plans/what-we-want-to-quiet-aurora.md` (on the Mac)
 3. `cd ~/airsenal/app && ./ops/install_pi.sh`
 4. Fill `~/airsenal-data/env` (ABSOLUTE paths only; values from
    `uv run airsenal_env get` on the Mac; `CLAUDE_CODE_OAUTH_TOKEN` from
-   `claude setup-token` on the Mac).
+   `claude setup-token` on the Mac; `TELEGRAM_BOT_TOKEN` from @BotFather and
+   `TELEGRAM_CHAT_ID` = your Telegram user id, after pressing Start on the
+   bot once).
 5. Initialise DB:
    `set -a; source ~/airsenal-data/env; set +a && .venv/bin/airsenal_setup_initial_db && .venv/bin/airsenal_update_db`
 6. Dry run (see below), then `./ops/install_pi_crontab.sh`.

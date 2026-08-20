@@ -67,7 +67,8 @@ for attempt in 1 2; do
   # generous limits: the deadline window is 3h and the rest of the pipeline
   # needs ~10 min, so research is never the bottleneck - these are runaway
   # stops, not schedule pressure
-  if timeout -k 60 2400 "$CLAUDE_BIN" -p \
+  # research never needs these secrets - keep them out of the headless env
+  if timeout -k 60 2400 env -u TELEGRAM_BOT_TOKEN -u FPL_PASSWORD "$CLAUDE_BIN" -p \
       --model opus --effort max \
       --output-format json \
       --dangerously-skip-permissions \

@@ -26,22 +26,20 @@ CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"
 
 mkdir -p "$RUN_DIR" "$LOG_DIR" "$STATE_DIR" "$BACKUP_DIR"
 
-# Send a Telegram message using the pquant bot credentials (read-only access
-# to the pquant env file; that file is never modified). Truncates to the
-# Telegram 4096-char limit. Returns nonzero on delivery failure (incl. HTTP
-# errors such as HTML parse rejections, via curl -f).
+# Send a Telegram message via the dedicated AIrsenal bot (@fplquant_bot).
+# TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID (the single recipient) come from the
+# ops env file sourced above. Truncates to the Telegram 4096-char limit.
+# Returns nonzero on delivery failure (incl. HTTP errors such as HTML parse
+# rejections, via curl -f).
 _send_telegram() {
   local msg="$1" mode="${2:-}"
-  local token chat
-  token=$(grep -m1 '^TELEGRAM_BOT_TOKEN=' "$PQUANT_ENV_FILE" | cut -d= -f2- | tr -d '"' | tr -d "'")
-  chat=$(grep -m1 '^TELEGRAM_CHAT_ID=' "$PQUANT_ENV_FILE" | cut -d= -f2- | tr -d '"' | tr -d "'")
-  if [[ -z "$token" || -z "$chat" ]]; then
-    echo "notify: TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not found in $PQUANT_ENV_FILE" >&2
+  if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+    echo "notify: TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set (expected in $OPS_ENV)" >&2
     return 1
   fi
-  local args=(-d chat_id="${chat}" --data-urlencode text="${msg:0:4000}")
+  local args=(-d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode text="${msg:0:4000}")
   [[ -n "$mode" ]] && args+=(-d parse_mode="$mode")
-  curl -sSf --max-time 20 -X POST "https://api.telegram.org/bot${token}/sendMessage" \
+  curl -sSf --max-time 20 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
     "${args[@]}" >/dev/null
 }
 

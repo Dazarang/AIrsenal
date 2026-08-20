@@ -18,7 +18,7 @@ echo "== env file =="
 if [[ ! -f "$DATA_ROOT/env" ]]; then
   cp "$SCRIPT_DIR/env.example" "$DATA_ROOT/env"
   chmod 600 "$DATA_ROOT/env"
-  echo "created $DATA_ROOT/env - FILL IN FPL_LOGIN, FPL_PASSWORD, CLAUDE_CODE_OAUTH_TOKEN"
+  echo "created $DATA_ROOT/env - FILL IN FPL_LOGIN, FPL_PASSWORD, CLAUDE_CODE_OAUTH_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID"
 else
   echo "$DATA_ROOT/env already exists"
 fi

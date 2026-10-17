@@ -1,6 +1,5 @@
 """
-Transfer-suggestion inspection and server-side verification for the Pi
-automation.
+Transfer-suggestion inspection and server-side verification for the Pi automation.
 
 Subcommands:
   snapshot                              print latest TransferSuggestion
@@ -19,7 +18,7 @@ Subcommands:
                                         unknown (is chip C active?), or -
                                         when C is none
 
-Only the result goes to stdout; everything the framework prints is sent to
+Only the result goes to stdout; everything airsenal prints is sent to
 stderr so callers can parse stdout.
 """
 
@@ -36,32 +35,42 @@ from gw_context import CHIPS, active_chip_name
 def latest_timestamp() -> str:
     from sqlalchemy import select
 
-    from airsenal.framework.schema import TransferSuggestion
-    from airsenal.framework.utils import session
+    from airsenal.db.models import TransferSuggestion
+    from airsenal.db.session import get_session
 
-    ts = session.scalars(
-        select(TransferSuggestion.timestamp).order_by(
-            TransferSuggestion.timestamp.desc()
+    ts = (
+        get_session()
+        .scalars(
+            select(TransferSuggestion.timestamp).order_by(
+                TransferSuggestion.timestamp.desc()
+            )
         )
-    ).first()
+        .first()
+    )
     return ts or "none"
 
 
 def suggestion_rows(gw: int, team_id: int) -> list:
-    from airsenal.framework.utils import CURRENT_SEASON, session
-    from airsenal.scripts.get_transfer_suggestions import get_transfer_suggestions
+    from airsenal.db.queries.predictions import get_transfer_suggestions
+    from airsenal.db.session import get_session
+    from airsenal.game.season import CURRENT_SEASON
 
-    return get_transfer_suggestions(
-        session, gameweek=gw, season=CURRENT_SEASON, fpl_team_id=team_id
+    return list(
+        get_transfer_suggestions(
+            gameweek=gw,
+            season=CURRENT_SEASON,
+            fpl_team_id=team_id,
+            dbsession=get_session(),
+        )
     )
 
 
 def my_team(team_id: int) -> dict | None:
     """Logged-in my-team view (picks, chips, transfers), or None on failure."""
-    from airsenal.framework.utils import fetcher
+    from airsenal.remote.fpl_api import get_fetcher
 
     try:
-        return fetcher.get_current_squad_data(team_id)
+        return get_fetcher(team_id).get_current_squad_data(team_id)
     except Exception as e:
         print(f"my-team fetch failed: {e}", file=sys.stderr)
         return None
@@ -77,7 +86,8 @@ def cmd_snapshot(_args) -> str:
 
 
 def cmd_check(args) -> str:
-    from airsenal.framework.utils import get_bank, get_player_name
+    from airsenal.db.queries.players import get_player_name
+    from airsenal.squad.state import get_bank
 
     new_rows = latest_timestamp() != args.since
     rows = suggestion_rows(args.gw, args.team_id)
@@ -123,13 +133,13 @@ def cmd_telegram(args) -> str:
     """Build the HTML-formatted Telegram summary for a completed run."""
     import html as html_mod
 
-    from airsenal.framework.utils import (
-        CURRENT_SEASON,
-        get_bank,
+    from airsenal.db.queries.players import (
         get_player,
         get_player_from_api_id,
         get_player_name,
     )
+    from airsenal.game.season import CURRENT_SEASON
+    from airsenal.squad.state import get_bank
 
     esc = html_mod.escape
     pos_emoji = {"GK": "\U0001f9e4", "DEF": "\U0001f6e1", "MID": "⚡", "FWD": "⚽"}
@@ -234,7 +244,7 @@ def transfers_applied(picks: list[dict], ins: set[int], outs: set[int]) -> bool:
 
 
 def cmd_verify(args) -> str:
-    from airsenal.framework.utils import get_player
+    from airsenal.db.queries.players import get_player
 
     data = my_team(args.team_id)
     if data is None:
@@ -293,7 +303,7 @@ def main() -> None:
     p.set_defaults(func=cmd_verify)
 
     args = parser.parse_args()
-    # the framework prints diagnostics (DB fallbacks, lookups) to stdout;
+    # airsenal prints diagnostics (Rich console, DB fallbacks) to stdout;
     # keep them off the result channel
     with contextlib.redirect_stdout(sys.stderr):
         output = args.func(args)

@@ -24,10 +24,13 @@ Full design/plan: `~/.claude/plans/what-we-want-to-quiet-aurora.md` (on the Mac)
   state (`~/airsenal-data/state/chips_state.json`).
 - `helpers/post_summary.py` — suggestion inspection, Telegram text,
   server-side verification.
+- `helpers/post_transfers.py` — `airsenal apply transfers --yes` with the
+  `.posted` / `.applied` markers written around the transfer POST itself.
 - State/logs under `~/airsenal-data/`: `run/` markers
   (`gwN.started/.posted/.applied/.done/.reminded/.attempts/...`), `logs/cron/`,
   `backups/` (sqlite backups, keep 8). `.posted` = a transfer POST was
-  attempted with unknown outcome (never re-POST; when the client-side
+  attempted with unknown outcome (written immediately before the POST, so
+  its absence means no POST was ever sent; never re-POST; when the client-side
   confirmation is missing the run checks the logged-in my-team view: picks
   match the suggestions → treated as applied, picks unchanged → `.posted`
   removed so the next attempt can retry); `.applied` = the transfers are in
@@ -50,12 +53,12 @@ Full design/plan: `~/.claude/plans/what-we-want-to-quiet-aurora.md` (on the Mac)
 2. `git clone git@github-airsenal:Dazarang/AIrsenal.git ~/airsenal/app`
 3. `cd ~/airsenal/app && ./ops/install_pi.sh`
 4. Fill `~/airsenal-data/env` (ABSOLUTE paths only; values from
-   `uv run airsenal_env get` on the Mac; `CLAUDE_CODE_OAUTH_TOKEN` from
+   `uv run airsenal env get` on the Mac; `CLAUDE_CODE_OAUTH_TOKEN` from
    `claude setup-token` on the Mac; `TELEGRAM_BOT_TOKEN` from @BotFather and
    `TELEGRAM_CHAT_ID` = your Telegram user id, after pressing Start on the
    bot once).
 5. Initialise DB:
-   `set -a; source ~/airsenal-data/env; set +a && .venv/bin/airsenal_setup_initial_db && .venv/bin/airsenal_update_db`
+   `set -a; source ~/airsenal-data/env; set +a && .venv/bin/airsenal db create && .venv/bin/airsenal db update --fpl-team-id "$FPL_TEAM_ID"`
 6. Dry run (see below), then `./ops/install_pi_crontab.sh`.
 
 ## Manual operations
@@ -96,7 +99,7 @@ tail -f ~/airsenal-data/logs/cron/gw*-dryrun-*.log
 - triple_captain / bench_boost are "team" chips (my-team endpoint, not the
   transfers payload); the pipeline does not activate them — you do it on the
   website after the ACTION REQUIRED Telegram message.
-  `airsenal_set_lineup` keeps an active TC/BB (it sends the chip back with the
+  `airsenal apply lineup` keeps an active TC/BB (it sends the chip back with the
   lineup; `chip: None` would cancel it), so re-runs are safe.
 - If a decided TC/BB is never activated, the next run notices (history vs
   state), sends a note, and returns the chip to the pool.
@@ -111,6 +114,12 @@ The Pi pulls `origin/main` (this fork) at the start of every run.
 
 ## Maintenance
 
+- AIrsenal v2 migration (one-time): a database written by AIrsenal v1 does not
+  work with v2. Move the old one aside
+  (`mv ~/airsenal-data/home/data.db ~/airsenal-data/backups/data-v1.db`),
+  run `./ops/install_pi.sh` again (it installs Python 3.14 via uv and the v2
+  environment), then initialise the DB as in setup step 5 and do a dry run.
+
 - The claude CLI updates itself every Monday 04:00 (cron line from
   `install_pi_crontab.sh`, log in `~/airsenal-data/logs/cron/claude-update.log`).
 - `claude setup-token` expires after ~1 year → regenerate on the Mac, update
@@ -120,7 +129,7 @@ The Pi pulls `origin/main` (this fork) at the start of every run.
   mean a transfer POST was attempted/confirmed and must never be re-POSTed).
   The scheduler treats a held `run/airsenal.lock` as "run in progress".
   Markers auto-reset when a new season reuses the gameweek number.
-- FPL login: `FPLDataFetcher.login` retries the flaky PKCE flow 3x internally;
+- FPL login: `FPLAuth.login` (src/airsenal/remote/fpl_auth.py) retries the flaky PKCE flow 3x internally;
   the pre-flight check fails the run only when all attempts fail.
 - Chip state repair: edit `chips_state.json` (set `"lapsed": true` to return
   a chip to the pool).

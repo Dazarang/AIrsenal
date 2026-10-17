@@ -3,7 +3,7 @@ Gameweek context + chip state management for the Pi automation.
 
 Subcommands (airsenal imports only where needed, so the light state
 subcommands stay fast):
-  assert-gw --gw N                      exit 3 if AIrsenal's NEXT_GAMEWEEK != N
+  assert-gw --gw N                      exit 3 if AIrsenal's next gameweek != N
   context --gw N --deadline-epoch E     emit the chip-research context JSON
   validate --context ctx.json           read decision JSON on stdin, print
                                         validated chip name or "none"
@@ -16,7 +16,7 @@ subcommands stay fast):
   active-chip                           chip active on the (logged-in) my-team
                                         view for the upcoming gameweek, or none
 
-Only the result goes to stdout; everything the framework prints is sent to
+Only the result goes to stdout; everything airsenal prints is sent to
 stderr so callers can parse stdout.
 """
 
@@ -26,7 +26,7 @@ import json
 import os
 import sys
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 CHIPS = ["wildcard", "free_hit", "triple_captain", "bench_boost"]
@@ -105,8 +105,9 @@ def reconcile_state(
     available_now: set[str] | None = None,
 ) -> list[str]:
     """
-    Bring past decisions in line with reality (mutates state, returns notes):
-    previous seasons are dropped; decisions are confirmed when the chip shows
+    Bring past decisions in line with reality (mutates state, returns notes).
+
+    Previous seasons are dropped; decisions are confirmed when the chip shows
     up in the played history, or is active right now for this gameweek; past
     decisions absent from the history are lapsed (never activated, or
     activated and cancelled again before the deadline). A past decision that
@@ -148,8 +149,9 @@ def record_decision(
     state: dict, gw: int, season: str, chip: str, confidence: float, reasoning: str
 ) -> None:
     """
-    Replace any unconfirmed decision for the gameweek with this one (mutates
-    state). A confirmed entry for the same chip is left alone; raises
+    Replace any unconfirmed decision for the gameweek with this one.
+
+    Mutates state. A confirmed entry for the same chip is left alone; raises
     ValueError if a confirmed entry for a different chip exists.
     """
     confirmed = [
@@ -170,7 +172,7 @@ def record_decision(
             "chip": chip,
             "confidence": confidence,
             "reasoning": reasoning,
-            "decided_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "decided_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "confirmed": False,
         }
     )
@@ -180,8 +182,9 @@ def chip_stock(
     gw: int, season: str, played: list[dict], entries: list[dict]
 ) -> list[str]:
     """
-    Chips still unused (and not reserved by a pending decision) in the half
-    that contains gw. 2026/27 rules: ALL four chips reset at the half boundary
+    Chips still unused, and not reserved by a pending decision, in gw's half.
+
+    2026/27 rules: ALL four chips reset at the half boundary
     - one full set per half, the first set dies at the GW19 deadline.
     """
     lo, hi = half_range(gw)
@@ -201,8 +204,9 @@ def compute_available_chips(
     gw: int, season: str, played: list[dict], entries: list[dict]
 ) -> tuple[list[str], list[str]]:
     """
-    Chips the pipeline may play THIS gameweek: the stock minus the per-week
-    rules. Returns (available, notes).
+    Chips the pipeline may play THIS gameweek.
+
+    The stock minus the per-week rules. Returns (available, notes).
     """
     notes: list[str] = []
     available = chip_stock(gw, season, played, entries)
@@ -267,37 +271,118 @@ def team_performance(history: dict, fetcher) -> dict:
 
 
 def cmd_assert_gw(args) -> None:
-    from airsenal.framework.utils import NEXT_GAMEWEEK
+    from airsenal.db.queries.gameweeks import next_gameweek
 
-    if args.gw != NEXT_GAMEWEEK:
+    if args.gw != (next_gw := next_gameweek()):
         print(
-            f"GAMEWEEK MISMATCH: scheduler says GW{args.gw} but AIrsenal "
-            f"NEXT_GAMEWEEK is {NEXT_GAMEWEEK}. Chip flags would be silently "
+            f"GAMEWEEK MISMATCH: scheduler says GW{args.gw} but AIrsenal's "
+            f"next gameweek is {next_gw}. Chip flags would be silently "
             "dropped - aborting.",
             file=sys.stderr,
         )
         sys.exit(3)
 
 
-def cmd_context(args) -> str:
+def squad_value(picks: dict[int, dict]) -> float:
+    """Sum of the selling prices of the current picks (keyed by element), in £m."""
+    return sum(p["selling_price"] for p in picks.values()) / 10
+
+
+def squad_details(gw: int, team_id: int, fetcher) -> list[dict]:
+    """The current squad with availability flags and this gameweek's prediction."""
+    from airsenal.db.queries.players import get_player
+    from airsenal.db.queries.predictions import get_predicted_points_for_player
+    from airsenal.db.queries.tags import get_latest_prediction_tag
+    from airsenal.game.season import CURRENT_SEASON
+    from airsenal.squad.history import get_starting_squad
+
+    squad = get_starting_squad(
+        gameweek=gw,
+        season=CURRENT_SEASON,
+        fpl_team_id=team_id,
+        use_api=True,
+        fetcher=fetcher,
+    )
+    summary = fetcher.get_player_summary_data()
+    try:
+        tag = get_latest_prediction_tag()
+    except Exception:
+        tag = None
+    squad_info: list[dict] = []
+    for p in squad.players:
+        player = get_player(p.player_id)
+        data = summary.get(player.fpl_api_id, {}) if player else {}
+        predicted = None
+        if tag and player:
+            try:
+                predicted = round(
+                    get_predicted_points_for_player(player, tag).get(gw, 0), 1
+                )
+            except Exception:
+                predicted = None
+        squad_info.append(
+            {
+                "name": player.name if player else str(p.player_id),
+                "position": getattr(p, "position", None),
+                "team": getattr(p, "team", None),
+                "status": data.get("status"),
+                "news": data.get("news") or None,
+                "chance_next_round": data.get("chance_of_playing_next_round"),
+                "form": data.get("form"),
+                "total_points": data.get("total_points"),
+                "predicted_points_this_gw": predicted,
+            }
+        )
+    return squad_info
+
+
+def fixture_info(gw: int) -> dict[str, dict]:
+    """Per-team fixture counts for the next 6 gameweeks (blank/double detection)."""
     from sqlalchemy import select
 
-    from airsenal.framework.schema import Fixture, Team
-    from airsenal.framework.utils import (
-        CURRENT_SEASON,
-        NEXT_GAMEWEEK,
-        fetcher,
-        get_bank,
-        get_free_transfers,
-        get_player,
-        session,
-    )
+    from airsenal.db.models import Fixture, Team
+    from airsenal.db.session import get_session
+    from airsenal.game.season import CURRENT_SEASON
+
+    session = get_session()
+    fixtures = session.scalars(
+        select(Fixture).where(
+            Fixture.season == CURRENT_SEASON,
+            Fixture.gameweek >= gw,
+            Fixture.gameweek < gw + 6,
+        )
+    ).all()
+    counts: dict[int, Counter] = {}
+    for f in fixtures:
+        counts.setdefault(f.gameweek, Counter())
+        counts[f.gameweek][f.home_team] += 1
+        counts[f.gameweek][f.away_team] += 1
+    # base team set from the Team table, not the fixture window - otherwise a
+    # team blanking in every window gameweek is invisible near season end
+    all_teams = set(
+        session.scalars(select(Team.name).where(Team.season == CURRENT_SEASON)).all()
+    ) or {t for c in counts.values() for t in c}
+    return {
+        str(g): {
+            "doubles": sorted(t for t, n in c.items() if n >= 2),
+            "blanks": sorted(all_teams - set(c)),
+        }
+        for g, c in sorted(counts.items())
+    }
+
+
+def cmd_context(args) -> str:
+    from airsenal.db.queries.gameweeks import next_gameweek
+    from airsenal.game.season import CURRENT_SEASON
+    from airsenal.remote.fpl_api import get_fetcher
+    from airsenal.squad.state import get_bank, get_free_transfers
 
     gw = args.gw
-    if gw != NEXT_GAMEWEEK:
-        print(f"NEXT_GAMEWEEK={NEXT_GAMEWEEK} != {gw}", file=sys.stderr)
+    if gw != (next_gw := next_gameweek()):
+        print(f"next gameweek {next_gw} != {gw}", file=sys.stderr)
         sys.exit(3)
     team_id = int(os.environ["FPL_TEAM_ID"])
+    fetcher = get_fetcher(team_id)
     notes: list[str] = []
 
     history = fetcher.get_fpl_team_history_data(team_id)
@@ -341,48 +426,9 @@ def cmd_context(args) -> str:
             notes.append(f"excluded by server-side chip status: {', '.join(dropped)}")
         available = [c for c in available if c in api_available]
 
-    # current squad with availability flags
     squad_info: list[dict] = []
     try:
-        from airsenal.framework.optimization_utils import get_starting_squad
-
-        squad = get_starting_squad(
-            next_gw=gw, season=CURRENT_SEASON, fpl_team_id=team_id, use_api=True
-        )
-        summary = fetcher.get_player_summary_data()
-        try:
-            from airsenal.framework.utils import (
-                get_latest_prediction_tag,
-                get_predicted_points_for_player,
-            )
-
-            tag = get_latest_prediction_tag()
-        except Exception:
-            tag = None
-        for p in squad.players:
-            player = get_player(p.player_id)
-            data = summary.get(player.fpl_api_id, {}) if player else {}
-            predicted = None
-            if tag and player:
-                try:
-                    predicted = round(
-                        get_predicted_points_for_player(player, tag).get(gw, 0), 1
-                    )
-                except Exception:
-                    predicted = None
-            squad_info.append(
-                {
-                    "name": player.name if player else str(p.player_id),
-                    "position": getattr(p, "position", None),
-                    "team": getattr(p, "team", None),
-                    "status": data.get("status"),
-                    "news": data.get("news") or None,
-                    "chance_next_round": data.get("chance_of_playing_next_round"),
-                    "form": data.get("form"),
-                    "total_points": data.get("total_points"),
-                    "predicted_points_this_gw": predicted,
-                }
-            )
+        squad_info = squad_details(gw, team_id, fetcher)
     except Exception as e:  # context is best-effort: research degrades gracefully
         notes.append(f"could not fetch current squad ({type(e).__name__}: {e})")
 
@@ -393,47 +439,21 @@ def cmd_context(args) -> str:
         notes.append(f"could not build performance history ({type(e).__name__})")
 
     try:
-        free_transfers = get_free_transfers(fpl_team_id=team_id, gameweek=gw)
+        free_transfers = get_free_transfers(
+            gameweek=gw, fpl_team_id=team_id, fetcher=fetcher
+        )
     except Exception:
         free_transfers = None
     try:
-        bank = get_bank(fpl_team_id=team_id) / 10
+        bank = get_bank(fpl_team_id=team_id, fetcher=fetcher) / 10
     except Exception:
         bank = None
     try:
-        squad_value = (
-            sum(p["selling_price"] for p in fetcher.get_current_picks(team_id)) / 10
-        )
+        value = squad_value(fetcher.get_current_picks(team_id))
     except Exception:
-        squad_value = None
+        value = None
 
-    # per-team fixture counts for the next 6 gameweeks (blank/double detection)
-    fixtures = session.scalars(
-        select(Fixture).where(
-            Fixture.season == CURRENT_SEASON,
-            Fixture.gameweek >= gw,
-            Fixture.gameweek < gw + 6,
-        )
-    ).all()
-    counts: dict[int, Counter] = {}
-    for f in fixtures:
-        counts.setdefault(f.gameweek, Counter())
-        counts[f.gameweek][f.home_team] += 1
-        counts[f.gameweek][f.away_team] += 1
-    # base team set from the Team table, not the fixture window - otherwise a
-    # team blanking in every window gameweek is invisible near season end
-    all_teams = set(
-        session.scalars(select(Team.name).where(Team.season == CURRENT_SEASON)).all()
-    ) or {t for c in counts.values() for t in c}
-    fixture_info = {
-        str(g): {
-            "doubles": sorted(t for t, n in c.items() if n >= 2),
-            "blanks": sorted(all_teams - set(c)),
-        }
-        for g, c in sorted(counts.items())
-    }
-
-    deadline = datetime.fromtimestamp(args.deadline_epoch, tz=timezone.utc)
+    deadline = datetime.fromtimestamp(args.deadline_epoch, tz=UTC)
     ctx = {
         "gameweek": gw,
         "season": CURRENT_SEASON,
@@ -448,8 +468,8 @@ def cmd_context(args) -> str:
         "performance": performance,
         "free_transfers": free_transfers,
         "bank": bank,
-        "squad_value": squad_value,
-        "fixtures_by_gameweek": fixture_info,
+        "squad_value": value,
+        "fixtures_by_gameweek": fixture_info(gw),
         "notes": notes,
     }
     return json.dumps(ctx, indent=2)
@@ -515,10 +535,11 @@ def cmd_chip_for_gw(args) -> str:
 
 def cmd_slack(args) -> str:
     """'chips_left gws_left slack' for the current half (public API only)."""
-    from airsenal.framework.utils import CURRENT_SEASON, fetcher
+    from airsenal.game.season import CURRENT_SEASON
+    from airsenal.remote.fpl_api import get_fetcher
 
     team_id = int(os.environ["FPL_TEAM_ID"])
-    played = chips_played(fetcher.get_fpl_team_history_data(team_id))
+    played = chips_played(get_fetcher(team_id).get_fpl_team_history_data(team_id))
     stock = chip_stock(args.gw, CURRENT_SEASON, played, load_state()["entries"])
     _, hi = half_range(args.gw)
     gws_left = hi - args.gw + 1
@@ -526,10 +547,12 @@ def cmd_slack(args) -> str:
 
 
 def cmd_active_chip(_args) -> str:
-    from airsenal.framework.utils import fetcher
+    from airsenal.remote.fpl_api import get_fetcher
 
     team_id = int(os.environ["FPL_TEAM_ID"])
-    return active_chip_name(fetcher.get_current_squad_data(team_id)) or "none"
+    return (
+        active_chip_name(get_fetcher(team_id).get_current_squad_data(team_id)) or "none"
+    )
 
 
 def main() -> None:
@@ -581,7 +604,7 @@ def main() -> None:
     p.set_defaults(func=cmd_active_chip)
 
     args = parser.parse_args()
-    # the framework prints diagnostics (DB fallbacks, lookups) to stdout;
+    # airsenal prints diagnostics (Rich console, DB fallbacks) to stdout;
     # keep them off the result channel
     with contextlib.redirect_stdout(sys.stderr):
         output = args.func(args)

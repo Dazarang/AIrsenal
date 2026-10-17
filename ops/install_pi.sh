@@ -23,9 +23,11 @@ else
   echo "$DATA_ROOT/env already exists"
 fi
 
-echo "== python env (uv sync --frozen) =="
+echo "== python env (uv sync --frozen --no-dev) =="
 cd "$APP_DIR"
-"$HOME/.local/bin/uv" sync --frozen
+# uv installs the interpreter pinned in .python-version (AIrsenal v2 needs
+# Python >= 3.12) when it is missing; the dev group is not needed in production
+"$HOME/.local/bin/uv" sync --frozen --no-dev
 
 echo "== claude code cli =="
 if [[ ! -x "$HOME/.local/bin/claude" ]]; then
@@ -38,7 +40,7 @@ echo "== database =="
 if [[ ! -f "$DATA_ROOT/home/data.db" ]]; then
   echo "database missing - after filling in the env file, run:"
   echo "  set -a; source $DATA_ROOT/env; set +a"
-  echo "  .venv/bin/airsenal_setup_initial_db && .venv/bin/airsenal_update_db"
+  echo "  .venv/bin/airsenal db create && .venv/bin/airsenal db update --fpl-team-id \"\$FPL_TEAM_ID\""
 else
   echo "database present"
 fi

@@ -14,6 +14,10 @@ DEADLINE="${2:?deadline epoch required}"
 DRY_RUN=0
 [[ "${3:-}" == "--dry-run" ]] && DRY_RUN=1
 
+# airsenal prints through Rich, which wraps at 80 columns when not on a
+# terminal: keep each line whole (and uncoloured) for the greps below
+export COLUMNS=200 NO_COLOR=1
+
 S="$RUN_DIR/gw${GW}"
 TS=$(date +%Y%m%dT%H%M%S)
 if (( DRY_RUN )); then
@@ -59,7 +63,7 @@ cd "$APP_DIR"
 if ! git pull --ff-only --autostash origin main; then
   notify_soft "${PREFIX}AIrsenal GW${GW}: git pull failed, running with previous version."
 fi
-if ! "$HOME/.local/bin/uv" sync --frozen; then
+if ! "$HOME/.local/bin/uv" sync --frozen --no-dev; then
   notify_soft "${PREFIX}AIrsenal GW${GW}: uv sync failed, running with existing venv."
 fi
 
@@ -71,16 +75,16 @@ CURRENT_STEP="pre-flight checks"
 
 "$PY" -c "
 from sqlalchemy import select
-from airsenal.framework.schema import Player
-from airsenal.framework.utils import session
+from airsenal.db.models import Player
+from airsenal.db.session import get_session
 import sys
-sys.exit(0 if session.scalars(select(Player)).first() else 1)
-" || { log "FATAL: database is empty - run airsenal_setup_initial_db"; exit 1; }
+sys.exit(0 if get_session().scalars(select(Player)).first() else 1)
+" || { log "FATAL: database is empty - run airsenal db create"; exit 1; }
 
-# the login flow is transiently flaky; FPLDataFetcher.login retries internally
+# the login flow is transiently flaky; FPLAuth.login retries internally
 log "checking FPL login..."
 "$PY" -c "
-from airsenal.framework.data_fetcher import FPLDataFetcher
+from airsenal.remote.fpl_api import FPLDataFetcher
 f = FPLDataFetcher()
 f.login()
 raise SystemExit(0 if f.logged_in else 1)
@@ -104,8 +108,8 @@ dst.close()
 fi
 
 # --- step 3: update database --------------------------------------------------
-CURRENT_STEP="airsenal_update_db"
-"$VENV_BIN/airsenal_update_db" --fpl_team_id "$FPL_TEAM_ID" | tee "$TMP/update_db.out"
+CURRENT_STEP="airsenal db update"
+"$VENV_BIN/airsenal" db update --fpl-team-id "$FPL_TEAM_ID" | tee "$TMP/update_db.out"
 if grep -q "Database is empty" "$TMP/update_db.out"; then
   log "FATAL: update_db reported empty database"
   exit 1
@@ -117,11 +121,11 @@ CURRENT_STEP="gameweek assertion"
 
 # --- step 5: predictions (before chip research so the chip decision can use
 # --- AIrsenal's own predicted points) -----------------------------------------
-CURRENT_STEP="airsenal_run_prediction"
+CURRENT_STEP="airsenal predict"
 if (( $(mins_left) < 60 )); then
   notify_soft "${PREFIX}AIrsenal GW${GW}: only $(mins_left)m to deadline before predictions - run may not finish. Consider making transfers manually."
 fi
-"$VENV_BIN/airsenal_run_prediction" --weeks_ahead "${WEEKS_AHEAD:-3}"
+"$VENV_BIN/airsenal" predict --n-gameweeks "${WEEKS_AHEAD:-3}"
 
 # --- step 6: chip research ----------------------------------------------------
 CURRENT_STEP="chip research"
@@ -139,22 +143,22 @@ fi
 log "chip decision: $CHIP"
 
 # --- step 7: optimization -----------------------------------------------------
-CURRENT_STEP="airsenal_run_optimization"
+CURRENT_STEP="airsenal optimize transfers"
 PRE_TS=$("$PY" "$OPS_LIB_DIR/helpers/post_summary.py" snapshot)
 CHIP_ARGS=()
 case "$CHIP" in
-  wildcard)       CHIP_ARGS=(--wildcard_week "$GW") ;;
-  free_hit)       CHIP_ARGS=(--free_hit_week "$GW") ;;
-  triple_captain) CHIP_ARGS=(--triple_captain_week "$GW") ;;
-  bench_boost)    CHIP_ARGS=(--bench_boost_week "$GW") ;;
+  wildcard)       CHIP_ARGS=(--wildcard-gameweek "$GW") ;;
+  free_hit)       CHIP_ARGS=(--free-hit-gameweek "$GW") ;;
+  triple_captain) CHIP_ARGS=(--triple-captain-gameweek "$GW") ;;
+  bench_boost)    CHIP_ARGS=(--bench-boost-gameweek "$GW") ;;
 esac
-"$VENV_BIN/airsenal_run_optimization" \
-  --weeks_ahead "${WEEKS_AHEAD:-3}" \
-  --num_thread "${NUM_THREAD:-3}" \
-  --max_hit "${MAX_HIT:-8}" \
-  --fpl_team_id "$FPL_TEAM_ID" \
+"$VENV_BIN/airsenal" optimize transfers \
+  --n-gameweeks "${WEEKS_AHEAD:-3}" \
+  --num-thread "${NUM_THREAD:-3}" \
+  --max-hit "${MAX_HIT:-8}" \
+  --fpl-team-id "$FPL_TEAM_ID" \
   "${CHIP_ARGS[@]}" | tee "$TMP/optimization.out"
-PRED_PTS=$(grep -m1 "Score with Strategy:" "$TMP/optimization.out" | grep -o "[0-9.]*pts" || true)
+PRED_PTS=$(grep -m1 "Optimised Score:" "$TMP/optimization.out" | grep -o "[0-9.]*pts" || true)
 
 # --- step 8: inspect suggestions ---------------------------------------------
 CURRENT_STEP="suggestion check"
@@ -210,19 +214,16 @@ LINEUP_FAILED=0
 if (( DRY_RUN )); then
   log "dry run: skipping POSTs. Would do: $APPLY_MODE"
 elif [[ "$APPLY_MODE" == "transfers" ]]; then
-  # .posted is written BEFORE the POST: if the process dies mid-POST, the
-  # retry does lineup-only + warning instead of a double POST. It is removed
-  # again below only when the server shows that nothing was applied.
-  touch "$S.posted"
-  set +e
-  PYTHONUNBUFFERED=1 "$VENV_BIN/airsenal_make_transfers" --fpl_team_id "$FPL_TEAM_ID" --confirm 2>&1 | tee "$TMP/apply.out"
-  apply_status=${PIPESTATUS[0]}
-  set -e
-  if grep -qE "Transfers made!|No transfers needed" "$TMP/apply.out"; then
-    # POST confirmed client-side (or nothing to POST): set the never-re-POST
-    # marker immediately, before any fallible verification
-    touch "$S.applied"
-  else
+  # the helper (= `airsenal apply transfers --yes`) writes .posted immediately
+  # before the transfer POST and .applied as soon as it succeeded (or when
+  # nothing needed POSTing): if the process dies mid-POST, the retry does
+  # lineup-only + warning instead of a double POST, and no .posted means no
+  # POST was ever sent. .posted is removed again below only when the server
+  # shows that nothing was applied.
+  apply_status=0
+  PYTHONUNBUFFERED=1 "$PY" "$OPS_LIB_DIR/helpers/post_transfers.py" --team-id "$FPL_TEAM_ID" \
+    --posted "$S.posted" --applied "$S.applied" || apply_status=$?
+  if [[ ! -f "$S.applied" ]]; then
     # no client-side confirmation: ask the server (logged-in my-team view)
     # whether the suggested transfers are there before deciding about a retry
     VERIFY=$("$PY" "$OPS_LIB_DIR/helpers/post_summary.py" verify \
@@ -236,19 +237,16 @@ elif [[ "$APPLY_MODE" == "transfers" ]]; then
         # nothing was applied: let the next attempt retry the transfers, but
         # still set a lineup on the current squad (independent and free)
         rm -f "$S.posted"
-        log "make_transfers failed and nothing was applied (the next attempt will retry); setting the lineup anyway"
-        PYTHONUNBUFFERED=1 "$VENV_BIN/airsenal_set_lineup" --fpl_team_id "$FPL_TEAM_ID" --confirm | tee -a "$TMP/apply.out" || true
+        log "applying transfers failed and nothing was applied (the next attempt will retry); setting the lineup anyway"
+        PYTHONUNBUFFERED=1 "$VENV_BIN/airsenal" apply lineup --fpl-team-id "$FPL_TEAM_ID" --yes || true
         log "FATAL: transfers not applied"
         exit 1
         ;;
       *)
-        # server state unknown: the payload is printed (unbuffered) right
-        # before the POST - if it never appeared, no POST was attempted
-        if ! grep -q "'confirmed': False" "$TMP/apply.out"; then
-          rm -f "$S.posted"
-          log "FATAL: make_transfers failed before any POST (the next attempt will retry)"
+        if [[ ! -f "$S.posted" ]]; then
+          log "FATAL: applying transfers failed before any POST (the next attempt will retry)"
         else
-          log "FATAL: make_transfers ended without confirmation and the server state could not be checked - no re-POST"
+          log "FATAL: the transfer POST ended without confirmation and the server state could not be checked - no re-POST"
         fi
         exit 1
         ;;
@@ -259,13 +257,13 @@ elif [[ "$APPLY_MODE" == "transfers" ]]; then
     # and if that fails too still report, but leave .done unset so the next
     # attempt does lineup-only (.applied blocks a second POST)
     log "transfer step done but the lineup step failed; retrying lineup"
-    PYTHONUNBUFFERED=1 "$VENV_BIN/airsenal_set_lineup" --fpl_team_id "$FPL_TEAM_ID" --confirm | tee -a "$TMP/apply.out" || {
+    PYTHONUNBUFFERED=1 "$VENV_BIN/airsenal" apply lineup --fpl-team-id "$FPL_TEAM_ID" --yes || {
       notify_soft "${PREFIX}AIrsenal GW${GW} WARNING: transfers applied but setting the lineup failed twice - will retry on the next attempt; set your starting 11 manually if it does not come through."
       LINEUP_FAILED=1
     }
   fi
 else
-  PYTHONUNBUFFERED=1 "$VENV_BIN/airsenal_set_lineup" --fpl_team_id "$FPL_TEAM_ID" --confirm | tee "$TMP/apply.out"
+  PYTHONUNBUFFERED=1 "$VENV_BIN/airsenal" apply lineup --fpl-team-id "$FPL_TEAM_ID" --yes
 fi
 
 # --- step 10: server-side verification (warning-only; .applied already set) ---

@@ -1,0 +1,15 @@
+{
+  "type": "object",
+  "properties": {
+    "play_chip": {"type": "boolean"},
+    "chip": {
+      "type": ["string", "null"],
+      "enum": ["wildcard", "free_hit", "triple_captain", "bench_boost", null]
+    },
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "sources": {"type": "array", "items": {"type": "string"}},
+    "reasoning": {"type": "string"}
+  },
+  "required": ["play_chip", "chip", "confidence", "sources", "reasoning"],
+  "additionalProperties": false
+}

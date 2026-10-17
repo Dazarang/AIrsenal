@@ -102,14 +102,15 @@ BUDGET=$(( (DEADLINE - $(date +%s) - 30 * 60) / 2 ))
 (( BUDGET < 300 )) && fail "not enough time left before the deadline for research"
 (( BUDGET > 2400 )) && BUDGET=2400
 
-echo "chip research: running claude (opus @ max, up to ${BUDGET}s per attempt)..." >&2
+echo "chip research: running claude (opus @ high, up to ${BUDGET}s per attempt)..." >&2
 CLAUDE_OK=0
 for attempt in 1 2; do
   # prompt via stdin, not argv (context JSON can grow; argv has ARG_MAX limits)
   # research never needs these secrets - keep them out of the headless env
   if timeout -k 60 "$BUDGET" env -u TELEGRAM_BOT_TOKEN -u TELEGRAM_CHAT_ID -u FPL_PASSWORD -u FPL_LOGIN "$CLAUDE_BIN" -p \
-      --model opus --effort max \
+      --model opus --effort high \
       --output-format json \
+      --json-schema "$(cat "$OPS_LIB_DIR/chip_decision.schema.json")" \
       --dangerously-skip-permissions \
       --max-turns 100 \
       < "$TMPD/prompt.txt" > "$TMPD/claude.json" 2>"$TMPD/claude.err"; then
@@ -136,23 +137,16 @@ print(max(by_model, direct))
 " 2>/dev/null || echo 0)
 echo "chip research: $SEARCHES web search/fetch requests" >&2
 
-# claude's JSON envelope -> result text -> first JSON object inside it
-python3 - "$TMPD/claude.json" > "$TMPD/decision.json" <<'EOF' || fail "could not parse claude output"
+# --json-schema makes the CLI validate the decision and put it in the
+# envelope's structured_output field
+python3 - "$TMPD/claude.json" > "$TMPD/decision.json" <<'EOF' || fail "claude returned no structured decision"
 import json, sys
 
 with open(sys.argv[1]) as f:
-    result = json.load(f).get("result", "")
-dec = json.JSONDecoder()
-for i, ch in enumerate(result):
-    if ch == "{":
-        try:
-            obj, _ = dec.raw_decode(result[i:])
-        except ValueError:
-            continue
-        if "play_chip" in obj:
-            json.dump(obj, sys.stdout)
-            sys.exit(0)
-raise SystemExit(1)
+    decision = json.load(f).get("structured_output")
+if not isinstance(decision, dict):
+    raise SystemExit(1)
+json.dump(decision, sys.stdout)
 EOF
 
 cp "$TMPD/decision.json" "$CHIP_LOG_DIR/gw${GW}-${RESEARCH_TS}.decision.json"

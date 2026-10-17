@@ -16,8 +16,10 @@ Full design/plan: `~/.claude/plans/what-we-want-to-quiet-aurora.md` (on the Mac)
   reminder at T-1h, post-mortem alert if a deadline passes without a
   completed run.
 - `run_gameweek.sh <gw> <deadline_epoch> [--dry-run]` — the orchestrator.
-- `chip_research.sh` — `claude -p` with WebSearch; safe default "none";
-  skipped entirely when no chip is available (GW1, chip already active).
+- `chip_research.sh` — `claude -p` (opus, effort high) with WebSearch;
+  the decision comes back as structured output validated against
+  `chip_decision.schema.json`; safe default "none"; skipped entirely when no
+  chip is available (GW1, chip already active).
 - `helpers/gw_context.py` — context JSON for the research prompt + chip
   state (`~/airsenal-data/state/chips_state.json`).
 - `helpers/post_summary.py` — suggestion inspection, Telegram text,
@@ -109,6 +111,8 @@ The Pi pulls `origin/main` (this fork) at the start of every run.
 
 ## Maintenance
 
+- The claude CLI updates itself every Monday 04:00 (cron line from
+  `install_pi_crontab.sh`, log in `~/airsenal-data/logs/cron/claude-update.log`).
 - `claude setup-token` expires after ~1 year → regenerate on the Mac, update
   `CLAUDE_CODE_OAUTH_TOKEN` in `~/airsenal-data/env`.
 - Stuck gameweek: inspect/remove `~/airsenal-data/run/gwN.*` markers

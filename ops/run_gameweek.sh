@@ -73,13 +73,23 @@ CURRENT_STEP="pre-flight checks"
 : "${FPL_LOGIN:?FPL_LOGIN not set}"
 : "${FPL_PASSWORD:?FPL_PASSWORD not set}"
 
+# exit 3 = empty DB; any other failure (import error, a pre-v2 schema without
+# transaction.counts_as_transfer, a locked file) has its own message
+DB_CHECK=0
 "$PY" -c "
 from sqlalchemy import select
-from airsenal.db.models import Player
+from airsenal.db.models import Player, Transaction
 from airsenal.db.session import get_session
 import sys
-sys.exit(0 if get_session().scalars(select(Player)).first() else 1)
-" || { log "FATAL: database is empty - run airsenal db create"; exit 1; }
+s = get_session()
+s.scalars(select(Transaction)).first()
+sys.exit(0 if s.scalars(select(Player)).first() else 3)
+" || DB_CHECK=$?
+case $DB_CHECK in
+  0) ;;
+  3) log "FATAL: database is empty - run airsenal db create"; exit 1 ;;
+  *) log "FATAL: database check failed (error above) - a pre-v2 DB needs airsenal db create --clean"; exit 1 ;;
+esac
 
 # the login flow is transiently flaky; FPLAuth.login retries internally
 log "checking FPL login..."

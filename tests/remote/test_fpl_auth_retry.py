@@ -61,6 +61,9 @@ def test_a_network_error_on_the_last_attempt_is_a_remote_error(monkeypatch, auth
     with pytest.raises(RemoteConnectionError):
         auth.login()
     assert auth.logged_in is False
+    # remembered: a second call does not run the three sign-ons again
+    auth.login()
+    assert auth.login_failed is True
 
 
 def test_a_session_passed_in_is_kept_between_attempts(monkeypatch, auth):

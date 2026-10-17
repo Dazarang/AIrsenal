@@ -15,19 +15,28 @@ Exits nonzero on any failure; the markers say how far it got.
 """
 
 import argparse
+import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 
 def with_markers(
-    post: Callable[..., None], posted: Path, applied: Path
-) -> Callable[..., None]:
+    post: Callable[[Any, dict[str, Any]], None], posted: Path, applied: Path
+) -> Callable[[Any, dict[str, Any]], None]:
     """`post`, with `posted` written right before it and `applied` once it returns."""
 
-    def wrapped(*args: Any, **kwargs: Any) -> None:
+    def wrapped(fetcher: Any, payload: dict[str, Any]) -> None:
+        # post_transfers logs in first; without a session no request can be
+        # sent, so fail before .posted exists and leave the retry open
+        fetcher.login()
+        if not fetcher.logged_in:
+            msg = "FPL login failed - no transfer POST was sent"
+            raise RuntimeError(msg)
+        # v2 logs the payload only at debug level; keep the chip field auditable
+        print(f"transfer payload: {json.dumps(payload)}", flush=True)
         posted.touch()
-        post(*args, **kwargs)
+        post(fetcher, payload)
         applied.touch()
 
     return wrapped

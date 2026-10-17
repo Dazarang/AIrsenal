@@ -161,6 +161,9 @@ class FPLAuth:
                 if isinstance(e, _LoginStepError):
                     self._set_login_failed(exception=e.__cause__, msg=str(e))
                     return
+                # remembered, so later calls in this process do not run three
+                # more sign-ons each; still raised for the callers' fallbacks
+                self.login_failed = True
                 if isinstance(e, RemoteError):
                     raise
                 msg = "Failed to log in to the FPL API"

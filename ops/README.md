@@ -114,11 +114,15 @@ The Pi pulls `origin/main` (this fork) at the start of every run.
 
 ## Maintenance
 
-- AIrsenal v2 migration (one-time): a database written by AIrsenal v1 does not
-  work with v2. Move the old one aside
-  (`mv ~/airsenal-data/home/data.db ~/airsenal-data/backups/data-v1.db`),
+- AIrsenal v2 migration (one-time, before the next scheduled run): a database
+  written by AIrsenal v1 does not work with v2 (no
+  `transaction.counts_as_transfer`). On the Pi: `git pull --ff-only origin
+  main` (`install_pi.sh` does not pull), move the old DB aside
+  (`mv ~/airsenal-data/home/data.db ~/airsenal-data/backups/v1-final.db`),
   run `./ops/install_pi.sh` again (it installs Python 3.14 via uv and the v2
   environment), then initialise the DB as in setup step 5 and do a dry run.
+  Pushing v2 to `main` without this loses the next gameweek: the run fails
+  closed at the pre-flight DB check.
 
 - The claude CLI updates itself every Monday 04:00 (cron line from
   `install_pi_crontab.sh`, log in `~/airsenal-data/logs/cron/claude-update.log`).

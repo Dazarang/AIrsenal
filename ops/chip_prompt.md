@@ -79,8 +79,8 @@ tips: they cost turns and decide nothing.
 Research thoroughly — depth beats speed here, and there is ample time. Typical
 good runs use 6-15 searches/fetches; use more if the situation is genuinely
 ambiguous. Stop when further research would no longer change your decision,
-then output the JSON. If your searches fail or return nothing usable, say so
-and output play_chip:false. Never fall back to memory.
+then return the decision. If your searches fail or return nothing usable, say
+so and return play_chip:false. Never fall back to memory.
 
 ## Deciding
 
@@ -137,12 +137,9 @@ of `chips_available`:
 
 ## Output
 
-Finish with a few sentences of reasoning, then exactly ONE raw JSON object:
-the last thing in your message, on a single line, no code fence, and no other
-JSON object anywhere in that message.
+Return the decision as your structured output, with these fields:
 
-{"play_chip": false, "chip": null, "confidence": 0.8, "sources": ["site - date - fact"], "reasoning": "1-3 sentences"}
-
+- `play_chip`: true or false.
 - `chip`: a string copied from `chips_available`, or null when `play_chip` is
   false. A chip that is not in that list, or play_chip:true with a null chip,
   is silently discarded.
@@ -151,7 +148,8 @@ JSON object anywhere in that message.
   automatically once chips are close to expiring, slack <= 2) — if you cannot
   honestly get there, output play_chip:false and say why. Do not inflate the
   number to clear the bar.
-- `sources`: 2-6 pages you actually opened this session, each with its date.
+- `sources`: 2-6 pages you actually opened this session, each as
+  "site - date - fact".
 - `reasoning`: sent verbatim to the manager's phone — plain text, no newlines,
   no markup. For triple_captain/bench_boost it must say what to activate and
   why (name the captain), because they have to click it themselves before the

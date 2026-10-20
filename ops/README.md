@@ -16,7 +16,7 @@ Full design/plan: `~/.claude/plans/what-we-want-to-quiet-aurora.md` (on the Mac)
   reminder at T-1h, post-mortem alert if a deadline passes without a
   completed run.
 - `run_gameweek.sh <gw> <deadline_epoch> [--dry-run]` — the orchestrator.
-- `chip_research.sh` — `claude -p` (opus, effort high) with WebSearch;
+- `chip_research.sh` — `claude -p` (opus, effort high) with only WebSearch and WebFetch (no shell);
   the decision comes back as structured output validated against
   `chip_decision.schema.json`; safe default "none"; skipped entirely when no
   chip is available (GW1, chip already active).

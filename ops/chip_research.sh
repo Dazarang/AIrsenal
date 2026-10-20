@@ -107,11 +107,15 @@ CLAUDE_OK=0
 for attempt in 1 2; do
   # prompt via stdin, not argv (context JSON can grow; argv has ARG_MAX limits)
   # research never needs these secrets - keep them out of the headless env
+  # web tools only: claude reads arbitrary pages, and with a shell a prompt
+  # injection could read the env file directly, which env -u cannot prevent
   if timeout -k 60 "$BUDGET" env -u TELEGRAM_BOT_TOKEN -u TELEGRAM_CHAT_ID -u FPL_PASSWORD -u FPL_LOGIN "$CLAUDE_BIN" -p \
       --model opus --effort high \
       --output-format json \
       --json-schema "$(cat "$OPS_LIB_DIR/chip_decision.schema.json")" \
-      --dangerously-skip-permissions \
+      --tools WebSearch,WebFetch \
+      --allowedTools WebSearch,WebFetch \
+      --strict-mcp-config \
       --max-turns 100 \
       < "$TMPD/prompt.txt" > "$TMPD/claude.json" 2>"$TMPD/claude.err"; then
     CLAUDE_OK=1

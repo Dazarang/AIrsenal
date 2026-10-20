@@ -129,15 +129,19 @@ done
 cp "$TMPD/claude.json" "$CHIP_LOG_DIR/gw${GW}-${RESEARCH_TS}.claude.json"
 
 # how much live research actually happened? (0 searches = training-data-only)
-# searches run by tool subagents are only counted under modelUsage, per model;
-# usage.server_tool_use covers the main model alone
+# the session transcript lists every WebSearch/WebFetch call; the envelope's
+# modelUsage counts searches only (no fetches) and is the fallback
 SEARCHES=$(python3 -c "
-import json
+import glob, json, os
 d = json.load(open('$TMPD/claude.json'))
 by_model = sum(int(m.get('webSearchRequests') or 0) for m in (d.get('modelUsage') or {}).values())
-u = d.get('usage', {}).get('server_tool_use', {})
-direct = int(u.get('web_search_requests') or 0) + int(u.get('web_fetch_requests') or 0)
-print(max(by_model, direct))
+calls = 0
+for path in glob.glob(os.path.expanduser('~/.claude/projects/*/' + d['session_id'] + '.jsonl')):
+    for line in open(path):
+        e = json.loads(line)
+        if e.get('type') == 'assistant':
+            calls += sum(b.get('name') in ('WebSearch', 'WebFetch') for b in e['message'].get('content', []))
+print(max(by_model, calls))
 " 2>/dev/null || echo 0)
 echo "chip research: $SEARCHES web search/fetch requests" >&2
 

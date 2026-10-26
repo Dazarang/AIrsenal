@@ -14,7 +14,7 @@ Full design/plan: `~/.claude/plans/what-we-want-to-quiet-aurora.md` (on the Mac)
 - `check_deadline.sh` — cron entry (every 15 min): live deadline from
   bootstrap-static, fires `run_gameweek.sh` at T-3h (max 2 attempts), chip
   reminder at T-1h, post-mortem alert if a deadline passes without a
-  completed run.
+  completed run, weekly review once a gameweek's points are final.
 - `run_gameweek.sh <gw> <deadline_epoch> [--dry-run]` — the orchestrator.
 - `chip_research.sh` — `claude -p` (opus, effort high) with only WebSearch and WebFetch (no shell);
   the decision comes back as structured output validated against
@@ -23,11 +23,16 @@ Full design/plan: `~/.claude/plans/what-we-want-to-quiet-aurora.md` (on the Mac)
 - `helpers/gw_context.py` — context JSON for the research prompt + chip
   state (`~/airsenal-data/state/chips_state.json`).
 - `helpers/post_summary.py` — suggestion inspection, Telegram text,
-  server-side verification.
+  server-side verification (transfers, chip, and whether the starting 11 and
+  captain on the server score as well as the lineup AIrsenal sets).
+- `helpers/gw_review.py` — the weekly review: points against the average,
+  captain against the best starter, bench points, predicted against actual
+  points (for the XI and for every player), season totals. Each review is
+  also appended to `~/airsenal-data/state/gw_reviews.jsonl`.
 - `helpers/post_transfers.py` — `airsenal apply transfers --yes` with the
   `.posted` / `.applied` markers written around the transfer POST itself.
 - State/logs under `~/airsenal-data/`: `run/` markers
-  (`gwN.started/.posted/.applied/.done/.reminded/.attempts/...`), `logs/cron/`,
+  (`gwN.started/.posted/.applied/.done/.reminded/.attempts/.reviewed/.tag/...`), `logs/cron/`,
   `backups/` (sqlite backups, keep 8). `.posted` = a transfer POST was
   attempted with unknown outcome (written immediately before the POST, so
   its absence means no POST was ever sent; never re-POST; when the client-side
@@ -77,6 +82,12 @@ tail -f ~/airsenal-data/logs/cron/gw*-dryrun-*.log
 
 # telegram test
 ./ops/notify.sh "test message"
+
+# weekly review of a finished gameweek (prints the message, sends nothing;
+# appends to state/gw_reviews.jsonl). To resend it from the scheduler,
+# remove ~/airsenal-data/run/gwN.reviewed and gwN.review_attempts (works
+# only while N is the newest finished gameweek)
+.venv/bin/python ops/helpers/gw_review.py report --gw <gw>
 ```
 
 ## Chip semantics

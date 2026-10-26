@@ -6,12 +6,14 @@
 #   - sends a chip reminder REMIND_HOURS_BEFORE the deadline if a chip was
 #     decided for this gameweek
 #   - sends a post-mortem alert if a deadline passed without a completed run
+#   - sends the weekly review once a gameweek's points are final
 #   - detects deadline moves (and season rollover reusing gameweek numbers)
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 BOOTSTRAP_URL="https://fantasy.premierleague.com/api/bootstrap-static/"
 MAX_ATTEMPTS=2
+REVIEW_ATTEMPTS=3
 now=$(date +%s)
 
 # --- post-mortem for passed deadlines -----------------------------------------
@@ -43,6 +45,28 @@ ev = [e for e in data.get("events", []) if e.get("is_next")]
 if ev:
     print(ev[0]["id"], ev[0]["deadline_time"])
 ' <<<"$json") || { log "bootstrap-static parse failed; will retry next tick"; exit 0; }
+
+# --- weekly review once a gameweek's points are final -------------------------
+# before the "no next gameweek" exit, so the season's last gameweek is reviewed
+# too; a failing review is retried on the next ticks, at most REVIEW_ATTEMPTS.
+# Skipped while a run holds the lock: the run writes the database the review
+# reads, and a locked database must not use up the attempts
+reviewed=$(python3 "$OPS_LIB_DIR/helpers/gw_review.py" last-checked <<<"$json" || true)
+if [[ -n "$reviewed" && ! -f "$RUN_DIR/gw${reviewed}.reviewed" ]] \
+    && flock -n "$RUN_DIR/airsenal.lock" true; then
+  R="$RUN_DIR/gw${reviewed}"
+  ratt=$(( $(cat "$R.review_attempts" 2>/dev/null || echo 0) + 1 ))
+  echo "$ratt" > "$R.review_attempts"
+  if msg=$(timeout 300 "$PY" "$OPS_LIB_DIR/helpers/gw_review.py" report --gw "$reviewed" \
+      2>>"$LOG_DIR/review.log"); then
+    notify_html_soft "$msg"
+    touch "$R.reviewed"
+  elif (( ratt >= REVIEW_ATTEMPTS )); then
+    notify_soft "AIrsenal GW${reviewed}: weekly review failed ${ratt} times - see $LOG_DIR/review.log"
+    touch "$R.reviewed"
+  fi
+fi
+
 [[ -z "$next" ]] && exit 0
 
 gw=${next%% *}
@@ -69,7 +93,8 @@ if [[ -f "$S.deadline" ]]; then
       # jumped > 30 days: a new season is reusing this gameweek number -
       # clear last season's markers or this gameweek never runs again
       rm -f "$S.done" "$S.attempts" "$S.started" "$S.applied" "$S.posted" \
-        "$S.postmortem" "$S.reminded" "$S.moved"
+        "$S.postmortem" "$S.reminded" "$S.moved" "$S.reviewed" "$S.review_attempts" \
+        "$S.tag"
       # and at GW1 every recorded chip decision is last season's
       (( gw == 1 )) && echo '{"entries": []}' > "$CHIPS_STATE"
     else

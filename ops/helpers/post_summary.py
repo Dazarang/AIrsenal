@@ -10,13 +10,16 @@ Subcommands:
   telegram ...                          HTML summary for the Telegram report
   picks-elements --team-id T            JSON list of the element ids currently
                                         picked (logged-in my-team view)
-  verify --gw N --team-id T --chip C    print "<transfers> <chip_status>":
+  verify --gw N --team-id T --chip C    print "<transfers> <chip_status> <lineup>":
                                         transfers = ok | mismatch | unknown
                                         (do the current picks contain every
                                         suggested IN and none of the OUTs?),
                                         chip_status = confirmed | absent |
                                         unknown (is chip C active?), or -
-                                        when C is none
+                                        when C is none, lineup = ok |
+                                        mismatch | unknown (do the starters
+                                        and captain score as well as the ones
+                                        `airsenal apply lineup` picks?)
 
 Only the result goes to stdout; everything airsenal prints is sent to
 stderr so callers can parse stdout.
@@ -243,12 +246,48 @@ def transfers_applied(picks: list[dict], ins: set[int], outs: set[int]) -> bool:
     return ins <= elements and not (outs & elements)
 
 
+def lineup_shortfall(picks: list[dict]) -> float:
+    """
+    Predicted points by which these picks' lineup falls short of AIrsenal's.
+
+    AIrsenal's lineup is the one `airsenal apply lineup` picks for the same
+    squad. Comparing scores rather than players keeps a tie between two
+    equally predicted players from reading as a difference.
+    """
+    from airsenal.apply.lineup import get_lineup_from_payload
+    from airsenal.db.queries.gameweeks import next_gameweek
+    from airsenal.db.queries.players import require_api_id, require_player
+    from airsenal.db.queries.tags import get_latest_prediction_tag
+
+    squad = get_lineup_from_payload({"picks": picks})
+    tag, gameweek = get_latest_prediction_tag(), next_gameweek()
+    squad.optimize_lineup(tag, gameweek)
+    best = squad.total_points_for_starting_11(tag, gameweek)
+    by_element = {require_api_id(require_player(p.player_id)): p for p in squad.players}
+    for pick in picks:
+        player = by_element[pick["element"]]
+        player.is_starting = pick["position"] <= 11
+        player.is_captain = pick["is_captain"]
+    return best - squad.total_points_for_starting_11(tag, gameweek)
+
+
+def lineup_status(picks: list[dict]) -> str:
+    try:
+        shortfall = lineup_shortfall(picks)
+    except Exception as e:
+        # a check, not a step: say it could not be done rather than fail the run
+        print(f"lineup check failed: {e}", file=sys.stderr)
+        return "unknown"
+    print(f"lineup shortfall: {shortfall:.2f} pts", file=sys.stderr)
+    return "ok" if shortfall < 0.01 else "mismatch"
+
+
 def cmd_verify(args) -> str:
     from airsenal.db.queries.players import get_player
 
     data = my_team(args.team_id)
     if data is None:
-        return "unknown unknown"
+        return "unknown unknown unknown"
 
     api_ids: dict[int, set[int]] = {1: set(), -1: set()}
     for r in suggestion_rows(args.gw, args.team_id):
@@ -264,7 +303,7 @@ def cmd_verify(args) -> str:
     chip_status = "-"
     if args.chip in CHIPS:
         chip_status = "confirmed" if active_chip_name(data) == args.chip else "absent"
-    return f"{transfers} {chip_status}"
+    return f"{transfers} {chip_status} {lineup_status(data['picks'])}"
 
 
 def main() -> None:

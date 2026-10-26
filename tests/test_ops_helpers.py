@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "ops" / "helpers"))
+import post_summary
 from gw_context import squad_value
 from post_transfers import with_markers
 
@@ -66,3 +67,19 @@ def test_failed_login_raises_before_posted_so_a_retry_stays_open(tmp_path):
     assert calls == []
     assert not posted.exists()
     assert not applied.exists()
+
+
+def test_lineup_status_reads_the_shortfall(monkeypatch):
+    monkeypatch.setattr(post_summary, "lineup_shortfall", lambda _picks: 0.0)
+    assert post_summary.lineup_status([]) == "ok"
+    monkeypatch.setattr(post_summary, "lineup_shortfall", lambda _picks: 0.96)
+    assert post_summary.lineup_status([]) == "mismatch"
+
+
+def test_lineup_status_is_unknown_when_the_check_fails(monkeypatch):
+    def fail(_picks):
+        msg = "no predictions"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(post_summary, "lineup_shortfall", fail)
+    assert post_summary.lineup_status([]) == "unknown"

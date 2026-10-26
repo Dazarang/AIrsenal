@@ -136,6 +136,15 @@ if (( $(mins_left) < 60 )); then
   notify_soft "${PREFIX}AIrsenal GW${GW}: only $(mins_left)m to deadline before predictions - run may not finish. Consider making transfers manually."
 fi
 "$VENV_BIN/airsenal" predict --n-gameweeks "${WEEKS_AHEAD:-3}"
+# the weekly review grades this run's predictions; a later dry run or manual
+# predict writes a newer tag for the same gameweeks
+if (( ! DRY_RUN )); then
+  "$PY" -c "
+import sys
+from airsenal.db.queries.tags import get_latest_prediction_tag
+open(sys.argv[1], 'w').write(get_latest_prediction_tag())
+" "$S.tag" || log "could not record the prediction tag (the review will look it up)"
+fi
 
 # --- step 6: chip research ----------------------------------------------------
 CURRENT_STEP="chip research"
@@ -237,7 +246,7 @@ elif [[ "$APPLY_MODE" == "transfers" ]]; then
     # no client-side confirmation: ask the server (logged-in my-team view)
     # whether the suggested transfers are there before deciding about a retry
     VERIFY=$("$PY" "$OPS_LIB_DIR/helpers/post_summary.py" verify \
-      --gw "$GW" --team-id "$FPL_TEAM_ID" --chip none || echo "unknown unknown")
+      --gw "$GW" --team-id "$FPL_TEAM_ID" --chip none || echo "unknown unknown unknown")
     case "${VERIFY%% *}" in
       ok)
         log "no confirmation seen but the suggested transfers are on the server - treating as applied"
@@ -280,12 +289,15 @@ fi
 # the logged-in my-team view is the only source that shows the upcoming
 # gameweek's team and chip before the deadline
 CURRENT_STEP="server-side verification"
-TRANSFERS_OK=""; CHIP_STATUS=""
+TRANSFERS_OK=""; CHIP_STATUS=""; LINEUP_STATUS=""
 if (( ! DRY_RUN )); then
   VERIFY=$("$PY" "$OPS_LIB_DIR/helpers/post_summary.py" verify \
-    --gw "$GW" --team-id "$FPL_TEAM_ID" --chip "$CHIP" || echo "unknown unknown")
-  read -r TRANSFERS_OK CHIP_STATUS <<<"$VERIFY"
-  log "verification: transfers=$TRANSFERS_OK chip=$CHIP_STATUS"
+    --gw "$GW" --team-id "$FPL_TEAM_ID" --chip "$CHIP" || echo "unknown unknown unknown")
+  read -r TRANSFERS_OK CHIP_STATUS LINEUP_STATUS <<<"$VERIFY"
+  log "verification: transfers=$TRANSFERS_OK chip=$CHIP_STATUS lineup=$LINEUP_STATUS"
+  if [[ "$LINEUP_STATUS" == "mismatch" ]] && (( ! LINEUP_FAILED )); then
+    notify_soft "${PREFIX}AIrsenal GW${GW} WARNING: the starting 11 or captain on the server is not the one AIrsenal set. CHECK YOUR LINEUP on the FPL site ($(mins_left)m to deadline)."
+  fi
   if [[ "$APPLY_MODE" == "transfers" && "$TRANSFERS_OK" != "ok" ]]; then
     notify_soft "${PREFIX}AIrsenal GW${GW} WARNING: transfers POSTed but the team on the server does not match the suggestions (verification: ${TRANSFERS_OK}). CHECK YOUR TEAM on the FPL site now ($(mins_left)m to deadline)."
   fi

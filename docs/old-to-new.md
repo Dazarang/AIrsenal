@@ -2,7 +2,7 @@
 
 Every public function, class and method on `main` (under `airsenal/framework/` and `airsenal/scripts/`), and where it lives now. New paths are relative to `src/airsenal/` unless they start with `tests/` or `tools/`.
 
-331 of 377 names moved or were renamed, and 46 were removed. Names that didn't change were matched automatically; the rest were traced through the commit history on this branch.
+330 of 377 names moved or were renamed, and 47 were removed. Names that didn't change were matched automatically; the rest were traced through the commit history on this branch.
 
 ## Commands
 
@@ -318,8 +318,8 @@ Where each old module's contents went. The number in brackets is how many names 
 | `airsenal/framework/utils.py` | `get_top_predicted_points` | `reporting/top_players.py::get_top_predicted_points` | same name |
 | `airsenal/framework/utils.py` | `predicted_points_discord_payload` | `reporting/top_players.py::predicted_points_discord_payload` | same name |
 | `airsenal/framework/utils.py` | `get_return_gameweek_from_news` | `ingest/player_attributes.py::get_return_gameweek_from_news` | same name |
-| `airsenal/framework/utils.py` | `calc_average_minutes` | `prediction/minutes.py::calc_average_minutes` | same name |
-| `airsenal/framework/utils.py` | `estimate_minutes_from_prev_season` | `prediction/minutes.py::estimate_minutes_from_prev_season` | same name |
+| `airsenal/framework/utils.py` | `calc_average_minutes` | removed | removed: inlined in `get_recent_minutes_for_player` |
+| `airsenal/framework/utils.py` | `estimate_minutes_from_prev_season` | `prediction/minutes.py::get_previous_season_minutes` | renamed; returns each match's minutes, at any team |
 | `airsenal/framework/utils.py` | `get_recent_playerscore_rows` | `db/queries/scores.py::get_recent_playerscore_rows` | same name |
 | `airsenal/framework/utils.py` | `get_playerscores_for_player_gameweek` | `db/queries/scores.py::get_playerscores_for_player_gameweek` | same name |
 | `airsenal/framework/utils.py` | `get_recent_scores_for_player` | removed | removed: Flask API remnant |

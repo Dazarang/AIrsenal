@@ -111,19 +111,50 @@ because every one of them is predicted zero points:
 | everyone else | 618 | 274 (44.3%) | 7.68 pts |
 
 At gameweek 1 there are no current-season matches, so `get_recent_minutes_for_player`
-falls back to `estimate_minutes_from_prev_season`. That looks up the player's minutes
-in the previous *Premier League* season for their current team. Promoted players have
-no such history, so it returns `[0]`: they are predicted zero minutes, and so zero
-points. The same happens to every summer signing, which is part of why only 44% of the
-other players are predicted above zero.
+fell back to the player's minutes in the previous *Premier League* season, at their
+current team only. A player with no such history got `[0]`: zero minutes, and so zero
+points. This included every summer signing from another Premier League club.
 
-So the actual bias is the opposite of the worry. At gameweek 1 AIrsenal can't pick too
-many promoted-team players, because it can't pick any of them; Sunderland's strong
-start to 25/26 was invisible to it. Fixing this means deciding how many minutes to
-assume for a player with no history (for example, typical minutes for their position
-at their team, the FPL API's `chance_of_playing`, or using their price as a sign of
-whether they were signed to start), and that belongs in the minutes model. Until that's
-done, `promoted_like_bottom` makes no difference at gameweek 1 either way.
+The fallback now reads the previous season at *any* team
+(`get_previous_season_minutes`). A player with no current-team appearances gets their
+last previous-season matches as the sample, not their mean, so a gameweek 1
+prediction is a spread and not a single value. A player with some appearances still
+gets one value added: the previous-season mean, or 0 if they have none. Scored with
+`backtest_minutes_model`, one-gameweek horizon, mean log probability (higher is
+better) and mean absolute error in minutes:
+
+| variant | 2425 GW1-5 | 2526 GW1-5 | 2627 GW1-5 | 2425 season | 2526 season |
+|---|---|---|---|---|---|
+| old: current team only, else 0 | -4.918 / 14.38 | -4.613 / 13.62 | -5.018 / 14.07 | -2.827 / 10.84 | -2.764 / 10.42 |
+| any team | -4.905 / 14.36 | -4.566 / 13.58 | -4.966 / 14.08 | -2.827 / 10.84 | -2.754 / 10.42 |
+| any team, no 0 padding | -5.079 / 13.91 | -4.676 / 13.06 | -5.140 / 13.52 | -2.855 / 10.77 | -2.774 / 10.35 |
+| **any team, sample when no appearances** | **-4.085** / 14.43 | **-3.726** / 13.64 | **-4.197** / 14.20 | **-2.729** / 10.85 | **-2.652** / 10.43 |
+| as above, plus `[0, 90]` with no history | -3.784 / 15.15 | -3.414 / 14.79 | -3.881 / 15.05 | -2.687 / 11.07 | -2.613 / 10.70 |
+
+The chosen variant also has the same or better band accuracy as the old one in every
+GW1-5 cell, and the three-gameweek horizon gives the same order. Removing the 0
+padding improves the error but makes the log probability worse: a newcomer with one
+90-minute appearance is then given no chance of 0 minutes, and the ones who are
+benched cost about 27 each.
+
+The `[0, 90]` prior for players with no history at all scores better on log
+probability only because it gives every outcome some weight. It is not calibrated.
+Most players with no Premier League history do not play:
+
+| season | players, GW1-5 | price up to 4.5: played 0 | 4.6 to 5.5: played 0 | above 5.5: played 0 |
+|---|---|---|---|---|
+| 2425 | 170 | 87% | 64% | 55% |
+| 2526 | 222 | 92% | 72% | 15% |
+| 2627 | 187 | 86% | 69% | 58% |
+
+The percentages are of their GW1-5 performances. Only the players priced above 5.5
+often play, and they have 20 to 24 performances a season. So the prior was rejected:
+at the one-gameweek horizon it adds 0.7 to 1.2 minutes to the error at GW1-5. Players with no
+Premier League history are still predicted zero minutes. At gameweek 1 of 2526, 2 of
+34 Leeds players, 2 of 48 Sunderland players and 2 of 41 Burnley players are now
+predicted above zero, against none before. So `promoted_like_bottom` still makes
+almost no difference at gameweek 1. A prior for these players needs a signal the
+database does not hold, such as the FPL API's expected starting line-ups.
 
 `tools/team_ratings.py` prints the fitted ratings. That's how the two promoted teams
 were found to have net ratings of 0.96 and 0.89, almost exactly average, as feared.

@@ -9,51 +9,35 @@ from airsenal.db.session import get_session
 from airsenal.game.season import CURRENT_SEASON, get_previous_season
 
 
-def calc_average_minutes(player_scores: list[PlayerScore]) -> float:
-    """Mean minutes played across a list of PlayerScore rows."""
-    total = 0.0
-    for ps in player_scores:
-        total += ps.minutes
-    return total / len(player_scores)
-
-
-def estimate_minutes_from_prev_season(
+def get_previous_season_minutes(
     player: Player,
-    gameweek: int,
-    season: str = CURRENT_SEASON,
     n_matches_to_use: int = 10,
+    season: str = CURRENT_SEASON,
     dbsession: Session | None = None,
 ) -> list[float]:
     """
-    Mean minutes in the previous season, or [0] if we have none.
+    Minutes in the player's last `n_matches_to_use` matches of the previous season.
 
-    Only the matches the player was available for, and played for the team they
-    are at now.
+    Only the matches the player was available for, at any Premier League team,
+    so a player signed from another club in the summer keeps their history.
+    Most recent first; empty if the player has none.
     """
     dbsession = get_session(dbsession)
     query = (
-        select(PlayerScore)
+        select(PlayerScore.minutes)
         .join(Fixture, PlayerScore.fixture)
         .where(
             PlayerScore.player_id == player.player_id,
             Fixture.season == get_previous_season(season),
-            PlayerScore.player_team == player.team(gameweek, season),
             was_available(),
         )
     )
-    player_scores = list(
-        dbsession.scalars(
+    return [
+        float(minutes)
+        for minutes in dbsession.scalars(
             query.order_by(Fixture.gameweek.desc()).limit(n_matches_to_use)
-        ).all()
-    )
-
-    if len(player_scores) == 0:
-        # no FPL history / didn't play for current team last season
-        return [0]
-
-    # A weakness of the average is increased rotation at the end of the season, when
-    # teams don't have anything to play for.
-    return [calc_average_minutes(player_scores)]
+        )
+    ]
 
 
 def get_recent_minutes_for_player(
@@ -69,6 +53,12 @@ def get_recent_minutes_for_player(
 
     Only the matches the player was available for, for the team they are at now.
     `last_gameweek` is inclusive.
+
+    A player with fewer appearances than that is filled in from the previous
+    season. With no appearances at all, the sample is their last previous-season
+    matches, so a gameweek 1 prediction is a spread rather than a single value;
+    with some, one value is added: the mean of the previous season, or 0 if
+    they did not play in it.
     """
     dbsession = get_session(dbsession)
     playerscores = get_recent_playerscore_rows(
@@ -81,12 +71,17 @@ def get_recent_minutes_for_player(
         dbsession=dbsession,
     )
     minutes = [float(r.minutes) for r in playerscores]
+    if len(minutes) >= n_matches_to_use:
+        return minutes
 
-    if len(minutes) < n_matches_to_use:
-        minutes += estimate_minutes_from_prev_season(
-            player, gameweek=last_gameweek, season=season, dbsession=dbsession
-        )
-    return minutes or [0.0]
+    previous = get_previous_season_minutes(player, season=season, dbsession=dbsession)
+    if not previous:
+        return [*minutes, 0.0]
+    if not minutes:
+        return previous[:n_matches_to_use]
+    # A weakness of the mean is increased rotation at the end of the season, when
+    # teams don't have anything to play for.
+    return [*minutes, sum(previous) / len(previous)]
 
 
 def is_absent(

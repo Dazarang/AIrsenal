@@ -121,8 +121,11 @@ then predicts goal probabilities for every fixture in the gameweeks being predic
 The default minutes model is `RecentMinutesModel` in
 `airsenal.prediction.minutes_models`. It takes the minutes a player played in their
 last few matches (one per gameweek being predicted, and at least three) and treats
-each as equally likely. If a player hasn't played that many matches this season, the
-gap is filled with their average minutes last season for the team they're at now. Points are predicted for each of those minutes values and averaged, so a
+each as equally likely. Only matches for the team they're at now count. A player with
+no such matches this season takes their last ten matches of the previous season, at any
+Premier League team, as the sample. A player with some, but fewer than needed, gets one
+value added: their mean minutes over those ten matches, or 0 if they have none. Points
+are predicted for each of those minutes values and averaged, so a
 player who played 0, 70 and 90 minutes gets three predictions. In each one, the
 probability of scoring, assisting or conceding is scaled by the fraction of the match
 the player is assumed to play.

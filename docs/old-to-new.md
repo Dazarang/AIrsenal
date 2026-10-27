@@ -50,7 +50,7 @@ Where each old module's contents went. The number in brackets is how many names 
 | `airsenal/framework/season.py` | `game/season.py` (3), `db/queries/teams.py` (1), `remote/transfermarkt.py` (1) |
 | `airsenal/framework/squad.py` | `squad/squad.py` (17), `squad/lineup.py` (6) |
 | `airsenal/framework/transaction_utils.py` | `db/queries/transactions.py` (3), `squad/history.py` (2), `squad/state.py` (1) |
-| `airsenal/framework/utils.py` | removed (8), `db/queries/gameweeks.py` (7), `db/queries/fixtures.py` (6), `db/queries/scores.py` (6), `db/queries/players.py` (5), `squad/state.py` (4), `game/season.py` (3), `prediction/minutes.py` (3), `core/dates.py` (2), `db/queries/predictions.py` (2), `reporting/top_players.py` (2), `db/queries/tags.py` (2), `remote/transfermarkt.py` (1), `db/queries/teams.py` (1), `export/player_details.py` (1), `ingest/player_attributes.py` (1), `db/models.py` (1), `remote/fpl_api.py` (1), `core/copy.py` (1) |
+| `airsenal/framework/utils.py` | removed (9), `db/queries/gameweeks.py` (7), `db/queries/fixtures.py` (6), `db/queries/scores.py` (6), `db/queries/players.py` (5), `squad/state.py` (4), `game/season.py` (3), `prediction/minutes.py` (2), `core/dates.py` (2), `db/queries/predictions.py` (2), `reporting/top_players.py` (2), `db/queries/tags.py` (2), `remote/transfermarkt.py` (1), `db/queries/teams.py` (1), `export/player_details.py` (1), `ingest/player_attributes.py` (1), `db/models.py` (1), `remote/fpl_api.py` (1), `core/copy.py` (1) |
 | `airsenal/scripts/airsenal_run_pipeline.py` | `pipeline/run.py` (6), `optimization/moves.py` (1), `ingest/update.py` (1) |
 | `airsenal/scripts/data_sanity_checks.py` | `ingest/checks.py` (10) |
 | `airsenal/scripts/dump_db_contents.py` | `export/db_dump.py` (2) |

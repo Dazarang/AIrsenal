@@ -35,7 +35,10 @@ def get_previous_season_minutes(
     return [
         float(minutes)
         for minutes in dbsession.scalars(
-            query.order_by(Fixture.gameweek.desc()).limit(n_matches_to_use)
+            # the date breaks the tie between the two matches of a double gameweek
+            query.order_by(Fixture.gameweek.desc(), Fixture.date.desc()).limit(
+                n_matches_to_use
+            )
         )
     ]
 
@@ -55,10 +58,10 @@ def get_recent_minutes_for_player(
     `last_gameweek` is inclusive.
 
     A player with fewer appearances than that is filled in from the previous
-    season. With no appearances at all, the sample is their last previous-season
-    matches, so a gameweek 1 prediction is a spread rather than a single value;
-    with some, one value is added: the mean of the previous season, or 0 if
-    they did not play in it.
+    season. With no appearances at all, the sample is every match that
+    `get_previous_season_minutes` reads, so a gameweek 1 prediction is a spread
+    rather than a single value; with some, one value is added: the mean of the
+    previous season, or 0 if they did not play in it.
     """
     dbsession = get_session(dbsession)
     playerscores = get_recent_playerscore_rows(
@@ -75,12 +78,12 @@ def get_recent_minutes_for_player(
         return minutes
 
     previous = get_previous_season_minutes(player, season=season, dbsession=dbsession)
+    # A weakness of the previous season's last matches is increased rotation at the
+    # end of a season, when teams don't have anything to play for.
     if not previous:
         return [*minutes, 0.0]
     if not minutes:
-        return previous[:n_matches_to_use]
-    # A weakness of the mean is increased rotation at the end of the season, when
-    # teams don't have anything to play for.
+        return previous
     return [*minutes, sum(previous) / len(previous)]
 
 

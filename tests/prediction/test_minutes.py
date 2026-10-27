@@ -60,9 +60,11 @@ def _play(
     team: str,
     gameweek: int,
     season: str,
+    date: str | None = None,
 ) -> PlayerScore:
     """One played fixture, and the player's minutes in it."""
     fixture = Fixture(
+        date=date,
         gameweek=gameweek,
         home_team=team,
         away_team="ZZZ",
@@ -119,8 +121,52 @@ def test_a_summer_signing_keeps_the_minutes_from_their_old_club(dbsession):
     for gameweek, minutes in enumerate([10, 90, 0, 75], start=1):
         _play(dbsession, minutes, player, OLD_TEAM, gameweek, PREVIOUS_SEASON)
     _unplayed(dbsession, 1)
-    # most recent first, and only as many as were asked for
-    assert _recent(dbsession, player, last_gameweek=0) == [75.0, 0.0, 90.0]
+    # most recent first, and more than were asked for, so that one bad match at
+    # the end of last season does not decide gameweek 1
+    assert _recent(dbsession, player, last_gameweek=0) == [75.0, 0.0, 90.0, 10.0]
+
+
+def test_a_returning_player_starts_from_last_season_at_the_same_club(dbsession):
+    player = _player(dbsession)
+    for gameweek, minutes in enumerate([90, 45], start=1):
+        _play(dbsession, minutes, player, NEW_TEAM, gameweek, PREVIOUS_SEASON)
+    _unplayed(dbsession, 1)
+    assert _recent(dbsession, player, last_gameweek=0) == [45.0, 90.0]
+
+
+def test_previous_season_minutes_stop_at_ten_matches(dbsession):
+    player = _player(dbsession)
+    for gameweek in range(1, 13):
+        _play(dbsession, gameweek, player, OLD_TEAM, gameweek, PREVIOUS_SEASON)
+    dbsession.commit()
+    minutes = get_previous_season_minutes(player, season=SEASON, dbsession=dbsession)
+    assert minutes == [float(gameweek) for gameweek in range(12, 2, -1)]
+
+
+def test_seasons_before_the_previous_one_are_ignored(dbsession):
+    player = _player(dbsession)
+    _play(dbsession, 90, player, OLD_TEAM, 1, "2324")
+    _unplayed(dbsession, 1)
+    assert _recent(dbsession, player, last_gameweek=0) == [0.0]
+
+
+def test_this_season_at_a_former_club_is_not_part_of_the_sample(dbsession):
+    """A January signing starts again at the new club."""
+    player = _player(dbsession)
+    for gameweek in (1, 2):
+        _play(dbsession, 90, player, OLD_TEAM, gameweek, SEASON)
+    _unplayed(dbsession, 3)
+    assert _recent(dbsession, player, last_gameweek=2) == [0.0]
+
+
+def test_a_double_gameweek_is_read_latest_match_first(dbsession):
+    player = _player(dbsession)
+    # added in date order, so ordering by gameweek alone puts the earlier one first
+    _play(dbsession, 0, player, OLD_TEAM, 5, PREVIOUS_SEASON, "2025-01-01T15:00:00Z")
+    _play(dbsession, 90, player, OLD_TEAM, 5, PREVIOUS_SEASON, "2025-01-04T15:00:00Z")
+    dbsession.commit()
+    minutes = get_previous_season_minutes(player, season=SEASON, dbsession=dbsession)
+    assert minutes == [90.0, 0.0]
 
 
 def test_a_short_sample_is_filled_with_the_previous_season_mean(dbsession):

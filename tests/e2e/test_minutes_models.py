@@ -116,8 +116,12 @@ def test_a_band_the_model_never_sampled_is_recorded_as_impossible(pipeline_db):
 
     Every seeded appearance is 45 or 90 minutes, so the model gives a benching
     no weight at all - and the log score alone would not say why it was so bad.
+    The performance is from the season being scored, so the sample the model
+    reads cannot contain it.
     """
-    score = pipeline_db.scalars(select(PlayerScore)).first()
+    score = get_player_scores_for_gameweeks(
+        SCORE_GAMEWEEKS, SEASON, dbsession=pipeline_db
+    )[0]
     original = score.minutes
     score.minutes = 0
     try:

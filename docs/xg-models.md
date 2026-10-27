@@ -116,26 +116,34 @@ current team only. A player with no such history got `[0]`: zero minutes, and so
 points. This included every summer signing from another Premier League club.
 
 The fallback now reads the previous season at *any* team
-(`get_previous_season_minutes`). A player with no current-team appearances gets their
-last previous-season matches as the sample, not their mean, so a gameweek 1
-prediction is a spread and not a single value. A player with some appearances still
-gets one value added: the previous-season mean, or 0 if they have none. Scored with
-`backtest_minutes_model`, one-gameweek horizon, mean log probability (higher is
-better) and mean absolute error in minutes:
+(`get_previous_season_minutes`, the last ten matches the player was available for). A
+player with no current-team appearances gets all ten as the sample, not their mean,
+so a gameweek 1 prediction is a spread and not a single value. A player with some
+appearances still gets one value added: the previous-season mean, or 0 if they have
+none. Scored with `backtest_minutes_model`, one-gameweek horizon, mean log probability
+(higher is better) and mean absolute error in minutes:
 
 | variant | 2425 GW1-5 | 2526 GW1-5 | 2627 GW1-5 | 2425 season | 2526 season |
 |---|---|---|---|---|---|
 | old: current team only, else 0 | -4.918 / 14.38 | -4.613 / 13.62 | -5.018 / 14.07 | -2.827 / 10.84 | -2.764 / 10.42 |
 | any team | -4.905 / 14.36 | -4.566 / 13.58 | -4.966 / 14.08 | -2.827 / 10.84 | -2.754 / 10.42 |
 | any team, no 0 padding | -5.079 / 13.91 | -4.676 / 13.06 | -5.140 / 13.52 | -2.855 / 10.77 | -2.774 / 10.35 |
-| **any team, sample when no appearances** | **-4.085** / 14.43 | **-3.726** / 13.64 | **-4.197** / 14.20 | **-2.729** / 10.85 | **-2.652** / 10.43 |
+| any team, last 3 matches when no appearances | -4.085 / 14.43 | -3.726 / 13.64 | -4.197 / 14.20 | -2.729 / 10.85 | -2.652 / 10.43 |
 | as above, plus `[0, 90]` with no history | -3.784 / 15.15 | -3.414 / 14.79 | -3.881 / 15.05 | -2.687 / 11.07 | -2.613 / 10.70 |
+| **any team, last 10 matches when no appearances** | **-3.611** / 14.36 | **-3.361** / 13.59 | **-3.726** / 14.08 | **-2.671** / 10.84 | **-2.605** / 10.42 |
 
-The chosen variant also has the same or better band accuracy as the old one in every
-GW1-5 cell, and the three-gameweek horizon gives the same order. Removing the 0
-padding improves the error but makes the log probability worse: a newcomer with one
-90-minute appearance is then given no chance of 0 minutes, and the ones who are
-benched cost about 27 each.
+Of the variants in the table, the chosen one has the best log probability in every
+cell at both the one- and three-gameweek horizons, and its error is within 0.07
+minutes of the old one. Its band accuracy is within 0.004 of the old one: lower in
+four of the eleven cells measured, the same or higher in the rest. Three matches were too few: a player rotated
+in the last three matches of a season was predicted zero minutes for gameweek 1. Ten
+matches make a full prediction for gameweeks 1 to 3 of 2627 take 10.9 seconds of CPU,
+against 7.0 seconds before, because points are predicted once per value in the
+sample. A Raspberry Pi is slower than the machine this was measured on.
+
+Removing the 0 padding improves the error but makes the log probability worse: a
+newcomer with one 90-minute appearance is then given no chance of 0 minutes, and the
+ones who are benched cost about 27 each.
 
 The `[0, 90]` prior for players with no history at all scores better on log
 probability only because it gives every outcome some weight. It is not calibrated.
@@ -149,12 +157,24 @@ Most players with no Premier League history do not play:
 
 The percentages are of their GW1-5 performances. Only the players priced above 5.5
 often play, and they have 20 to 24 performances a season. So the prior was rejected:
-at the one-gameweek horizon it adds 0.7 to 1.2 minutes to the error at GW1-5. Players with no
-Premier League history are still predicted zero minutes. At gameweek 1 of 2526, 2 of
-34 Leeds players, 2 of 48 Sunderland players and 2 of 41 Burnley players are now
-predicted above zero, against none before. So `promoted_like_bottom` still makes
-almost no difference at gameweek 1. A prior for these players needs a signal the
-database does not hold, such as the FPL API's expected starting line-ups.
+at the one-gameweek horizon it adds 0.7 to 1.2 minutes to the error at GW1-5. It was
+measured on the three-match variant, not on the chosen one.
+
+Players with no Premier League history are still predicted zero minutes. Of every
+player with gameweek 1 attributes in 2526, these are now predicted above zero minutes
+at gameweek 1:
+
+| group | players | before | now |
+|---|---|---|---|
+| Leeds | 34 | 0 | 2 |
+| Sunderland | 48 | 0 | 2 |
+| Burnley | 41 | 0 | 2 |
+| everyone else | 646 | 305 | 324 |
+
+These are more players than in the squad selection table above, so the counts differ.
+`promoted_like_bottom` still makes almost no difference at gameweek 1. A prior for
+these players needs a signal the database does not hold, such as the FPL API's
+expected starting line-ups.
 
 `tools/team_ratings.py` prints the fitted ratings. That's how the two promoted teams
 were found to have net ratings of 0.96 and 0.89, almost exactly average, as feared.
